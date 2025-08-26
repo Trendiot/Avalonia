@@ -27,6 +27,9 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Restore dependencies
+        run: dotnet restore --configfile NuGet.Config
+
       - name: Install NUKE Global Tool
         run: dotnet tool install --global Nuke.GlobalTool
 
@@ -35,23 +38,6 @@ jobs:
 
      # - name: Add dotnet tools to PATH
      #   run: echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
-
-      - name: Check Installed Tools
-        run: |
-          echo "=== Local Tools ==="
-          dotnet tool list
-          echo "=== Global Tools ==="
-          dotnet tool list --global
-
-
-      # Restore NUKE tools
-      - name: Restore .NET Tools
-        run: dotnet tool restore
-
-      - name: Clean and Restore NUKE Tools
-        run: |
-          rm -rf ~/.nuget/packages/numerge
-          dotnet tool restore
 
       # Run NUKE build to create NuGet packages
       - name: Run NUKE Build
