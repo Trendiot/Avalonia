@@ -31,6 +31,11 @@ jobs:
       - name: Restore .NET Tools
         run: dotnet tool restore
 
+      - name: Clean and Restore NUKE Tools
+        run: |
+          rm -rf ~/.nuget/packages/numerge
+          dotnet tool restore
+
       # Run NUKE build to create NuGet packages
       - name: Run NUKE Build
         run: ./build.sh CreateNugetPackages --configuration Release --force-nuget-version 11.3.4.${{ github.run_number }}
