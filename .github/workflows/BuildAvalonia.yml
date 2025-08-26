@@ -27,6 +27,14 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Check Installed Tools
+        run: |
+          echo "=== Local Tools ==="
+          dotnet tool list
+          echo "=== Global Tools ==="
+          dotnet tool list --global
+
+
       # Restore NUKE tools
       - name: Restore .NET Tools
         run: dotnet tool restore
