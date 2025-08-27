@@ -27,20 +27,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Restore dependencies
-        run: dotnet restore --configfile NuGet.Config
-
-      - name: Install NUKE Global Tool
-        run: dotnet tool install --global Nuke.GlobalTool
-
-     # - name: Install Numerge Tool
-     #   run: dotnet tool install --global numerge
-
-     # - name: Add dotnet tools to PATH
-     #   run: echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
-
-      # Run NUKE build to create NuGet packages
-      - name: Run NUKE Build
+      - name: Run Build
         run: ./build.sh CreateNugetPackages --configuration Release --force-nuget-version 11.3.4.${{ github.run_number }}
         shell: bash
         
