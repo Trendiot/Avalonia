@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
 
     permissions:
       contents: read
@@ -28,12 +28,12 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Run Build
-        run: ./build.sh CreateNugetPackages --configuration Release --force-nuget-version 11.3.4.${{ github.run_number }}
+        run: ./build.sh CreateNugetPackages --configuration Release 
         shell: bash
         
   publish:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
 
     steps:
       - name: Download package artifact
