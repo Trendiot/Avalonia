@@ -20,6 +20,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: release/11.3.4_Rendering
+          submodules: recursive  # fetches submodules recursively
+          fetch-depth: 0     
+
+      - name: Update submodules
+        run: git submodule update --init --recursive
 
       # Setup .NET SDK
       - name: Setup .NET SDK
@@ -28,7 +33,7 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Run Build
-        run: ./build.sh CreateNugetPackages --configuration Release 
+        run: ./build.sh CreateNugetPackages --configuration Release --force-nuget-version 11.3.4.${{ github.run_number }}
         shell: bash
         
   publish:
