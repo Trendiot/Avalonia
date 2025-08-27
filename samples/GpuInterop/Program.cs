@@ -17,7 +17,7 @@ namespace GpuInterop
                 {
                     RenderingMode = new []
                     {
-                        Win32RenderingMode.Vulkan
+                        Win32RenderingMode.VulkanDynamic, // Try dynamic refresh rate first
                     }
                 })
                 .With(new X11PlatformOptions(){RenderingMode =new[] { X11RenderingMode.Vulkan } })

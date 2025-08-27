@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Avalonia.Platform;
+using Avalonia.Rendering;
 using Avalonia.Vulkan;
 using Avalonia.Win32.Interop;
 
@@ -9,11 +10,22 @@ namespace Avalonia.Win32.Vulkan;
 
 internal class VulkanSupport
 {
-    [DllImport("vulkan-1.dll")]
+  [DllImport("vulkan-1.dll")]
     private static extern IntPtr vkGetInstanceProcAddr(IntPtr instance, string name);
     
-    public static VulkanPlatformGraphics? TryInitialize(VulkanOptions options) =>
-        VulkanPlatformGraphics.TryCreate(options ?? new(), new VulkanPlatformSpecificOptions
+    public static VulkanPlatformGraphics? TryInitialize(VulkanOptions options, bool isDynamic = false)
+    {
+        Action<Action>? onPresentFenceCallback = null;
+        
+        if (isDynamic)
+        {
+            // Create and register the Vulkan render timer for dynamic refresh rate support
+            VulkanRenderTimer renderTimer = new();
+            AvaloniaLocator.CurrentMutable.Bind<IRenderTimer>().ToConstant(renderTimer);
+            onPresentFenceCallback = (fenceWaitAction) => renderTimer.SetPresentFenceWaitAction(fenceWaitAction);
+        }
+
+        var graphics = VulkanPlatformGraphics.TryCreate(options ?? new(), new VulkanPlatformSpecificOptions
         {
             RequiredInstanceExtensions = { "VK_KHR_win32_surface" },
             GetProcAddressDelegate = vkGetInstanceProcAddr,
@@ -21,8 +33,13 @@ internal class VulkanSupport
             PlatformFeatures = new Dictionary<Type, object>
             {
                 [typeof(IVulkanKhrSurfacePlatformSurfaceFactory)] = new VulkanSurfaceFactory()
-            }
+            },
+            OnPresentFence = onPresentFenceCallback,
+            IsDynamicMode = isDynamic
         });
+
+        return graphics;
+    }
 
     internal class VulkanSurfaceFactory : IVulkanKhrSurfacePlatformSurfaceFactory
     {
