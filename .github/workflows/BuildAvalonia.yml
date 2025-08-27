@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
 
     permissions:
       contents: read
@@ -33,7 +33,7 @@ jobs:
         
   publish:
     needs: build
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
 
     steps:
       - name: Download package artifact
