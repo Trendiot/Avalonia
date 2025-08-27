@@ -35,6 +35,12 @@ jobs:
       - name: Run Build
         run: ./build.sh CreateNugetPackages --configuration Release --force-nuget-version 11.3.4.${{ github.run_number }}
         shell: bash
+
+      - name: Upload package as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages
+          path: ./artifacts/*.nupkg
         
   publish:
     needs: build
