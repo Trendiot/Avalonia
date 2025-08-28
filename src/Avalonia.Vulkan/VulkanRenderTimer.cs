@@ -1,20 +1,36 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Threading;
 using Avalonia.Logging;
 using Avalonia.Rendering;
-using Avalonia.Vulkan;
 
-namespace Avalonia.Win32.Vulkan;
+namespace Avalonia.Vulkan;
 
-internal class VulkanRenderTimer : IRenderTimer
+/// <summary>
+/// <see cref="IRenderTimer"/> implementation for Vulkan.
+/// </summary>
+public class VulkanRenderTimer : IRenderTimer
 {
     private readonly object _syncLock = new();
     private Action? _waitForPresentFence;
 
+    /// <summary>
+    /// Raised when the render timer ticks to signal a new frame should be drawn.
+    /// </summary>
+    /// <remarks>
+    /// This event can be raised on any thread; it is the responsibility of the subscriber to
+    /// switch execution to the right thread.
+    /// </remarks>
     public event Action<TimeSpan>? Tick;
+    
+    /// <summary>
+    /// Indicates if the timer ticks on a non-UI thread
+    /// </summary>
     public bool RunsInBackground => true;
 
+    /// <summary>
+    /// Default Constructor.
+    /// </summary>
     public VulkanRenderTimer()
     {
         Logger.TryGet(LogEventLevel.Debug, "VulkanDynamic")?.Log(this, "VulkanRenderTimer created with fence-based VSync");

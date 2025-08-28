@@ -31,8 +31,8 @@ public enum Win32RenderingMode
     Vulkan = 4,
 
     /// <summary>
-    /// Avalonia would try to use native Windows Vulkan with GPU rendering and dynamic refresh rate matching.
-    /// Uses the same high refresh rate composition system as AngleEgl for VBlank-synchronized rendering.
+    /// Avalonia rendered with Vulkan GPU rendering and dynamic refresh rate matching.
+    /// Uses VSync synchronization.
     /// </summary>
     VulkanDynamic = 5
 }

@@ -217,11 +217,18 @@ namespace Avalonia.X11
 
                 if (renderingMode == X11RenderingMode.Vulkan)
                 {
-                    var vulkan = VulkanSupport.TryInitialize(info,
-                        AvaloniaLocator.Current.GetService<VulkanOptions>() ?? new());
+                    var vulkan = VulkanSupport.TryInitialize(info, AvaloniaLocator.Current.GetService<VulkanOptions>() ?? new VulkanOptions(), isDynamic: false);
                     if (vulkan != null)
                         return vulkan;
                 }
+
+                if (renderingMode == X11RenderingMode.VulkanDynamic)
+                {
+                    var vulkan = VulkanSupport.TryInitialize(info, AvaloniaLocator.Current.GetService<VulkanOptions>() ?? new VulkanOptions(), isDynamic: true);
+                    if (vulkan != null)
+                        return vulkan;
+                }
+                
             }
 
             throw new InvalidOperationException($"{nameof(X11PlatformOptions)}.{nameof(X11PlatformOptions.RenderingMode)} has a value of \"{string.Join(", ", opts.RenderingMode)}\", but no options were applied.");
@@ -254,7 +261,13 @@ namespace Avalonia
         /// <summary>
         /// Enables Vulkan rendering
         /// </summary>
-        Vulkan = 4
+        Vulkan = 4,
+        
+        /// <summary>
+        /// Avalonia rendered with Vulkan GPU rendering and dynamic refresh rate matching.
+        /// Uses VSync synchronization.
+        /// </summary>
+        VulkanDynamic = 5
     }
     
     /// <summary>

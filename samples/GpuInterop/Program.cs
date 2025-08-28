@@ -13,19 +13,13 @@ namespace GpuInterop
         public static AppBuilder BuildAvaloniaApp() =>
             AppBuilder.Configure<App>()
                 .UsePlatformDetect()
-                .With(new Win32PlatformOptions
-                {
-                    RenderingMode = new []
-                    {
-                        Win32RenderingMode.VulkanDynamic, // Try dynamic refresh rate first
-                    }
-                })
-                .With(new X11PlatformOptions(){RenderingMode =new[] { X11RenderingMode.Vulkan } })
+                .With(new Win32PlatformOptions(){RenderingMode = [Win32RenderingMode.VulkanDynamic] })
+                .With(new X11PlatformOptions(){RenderingMode = [X11RenderingMode.VulkanDynamic] })
                 .With(new VulkanOptions()
                 {
                     VulkanInstanceCreationOptions = new VulkanInstanceCreationOptions()
                     {
-                        UseDebug = true
+                        UseDebug = true,
                     }
                 })
                 .LogToTrace(LogEventLevel.Debug, "Vulkan");
