@@ -68,12 +68,24 @@ public class VulkanRenderTimer : IRenderTimer
         {
             if (_waitForPresentFence != null)
             {
-                // Wait for the presentation fence to be signaled
-                // This fence is signaled when GPU completes all presentation work
-                lock (_syncLock)
+                try
                 {
-                    _waitForPresentFence();
-                    _waitForPresentFence = null;
+                    // Wait for the presentation fence to be signaled
+                    // This fence is signaled when GPU completes all presentation work
+                    lock (_syncLock)
+                    {
+                        _waitForPresentFence();
+                        _waitForPresentFence = null;
+                    }
+                }
+                catch (VulkanException e)
+                {
+                    Logger.TryGet(LogEventLevel.Verbose, "VulkanDynamic RenderLoop")
+                        ?.Log(this, $"{e.Message}");
+                    if (!e.Message.Equals("vkWaitForFences returned VK_TIMEOUT", StringComparison.OrdinalIgnoreCase))
+                        throw;
+                    lock (_syncLock)
+                        _waitForPresentFence = null;
                 }
             }
             else
@@ -82,16 +94,19 @@ public class VulkanRenderTimer : IRenderTimer
                 Thread.Sleep(8);
             }
 
-            // Fire the render tick after presentation completes or rest
+            // Fire the render tick after presentation completes or reset
             Tick?.Invoke(sw.Elapsed);
         }
     }
 
+    /// <summary>
+    /// Updates the fence for Vsync Operations.
+    /// </summary>
+    /// <param name="fenceWaitAction"></param>
     public void SetPresentFenceWaitAction(Action fenceWaitAction)
     {
         lock (_syncLock)
             _waitForPresentFence = fenceWaitAction;
-        
         Logger.TryGet(LogEventLevel.Verbose, "VulkanDynamic")
             ?.Log(this, "Present fence wait action set for VSync synchronization");
     }
