@@ -29,6 +29,7 @@ public unsafe class VulkanImage : IDisposable
         private ImageView _imageView { get; set; }
         private DeviceMemory _imageMemory { get; set; }
         private readonly SharpDX.Direct3D11.Texture2D? _d3dTexture2D;
+        private IntPtr _cachedNtHandle = IntPtr.Zero;
         
         internal Image InternalHandle { get; private set; }
         internal Format Format { get; }
@@ -198,6 +199,10 @@ public unsafe class VulkanImage : IDisposable
         
         public IntPtr ExportOpaqueNtHandle()
         {
+            // Cache the handle to prevent multiple NT handle creation for the same memory
+            if (_cachedNtHandle != IntPtr.Zero)
+                return _cachedNtHandle;
+                
             if (!Api.TryGetDeviceExtension<KhrExternalMemoryWin32>(_instance, _device, out var ext))
                 throw new InvalidOperationException();
             var info = new MemoryGetWin32HandleInfoKHR()
@@ -206,8 +211,9 @@ public unsafe class VulkanImage : IDisposable
                 SType = StructureType.MemoryGetWin32HandleInfoKhr,
                 HandleType = ExternalMemoryHandleTypeFlags.OpaqueWin32Bit
             };
-            ext.GetMemoryWin32Handle(_device, info, out var fd).ThrowOnError();
-            return fd;
+            ext.GetMemoryWin32Handle(_device, info, out var handle).ThrowOnError();
+            _cachedNtHandle = handle;
+            return _cachedNtHandle;
         }
         
         public IPlatformHandle Export()
@@ -267,9 +273,17 @@ public unsafe class VulkanImage : IDisposable
         {
             TransitionLayout((ImageLayout)destinationLayout, (AccessFlags)destinationAccessFlags);
         }
+        
 
         public unsafe void Dispose()
         {
+            // Close the cached NT handle if we created one
+            if (_cachedNtHandle != IntPtr.Zero && RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                CloseHandle(_cachedNtHandle);
+                _cachedNtHandle = IntPtr.Zero;
+            }
+            
             Api.DestroyImageView(_device, _imageView, null);
             Api.DestroyImage(_device, InternalHandle, null);
             Api.FreeMemory(_device, _imageMemory, null);
@@ -312,4 +326,7 @@ public unsafe class VulkanImage : IDisposable
                     encoded.SaveTo(s);
             }
         }
+        
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr hObject);
     }
