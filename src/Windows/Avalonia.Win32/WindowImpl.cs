@@ -111,6 +111,7 @@ namespace Avalonia.Win32
 
         private const int MaxPointerHistorySize = 512;
         private static readonly PooledList<RawPointerPoint> s_intermediatePointsPooledList = new();
+        private static readonly List<InternalPoint> s_sortedPoints = new(64);
         private static POINTER_TOUCH_INFO[]? s_historyTouchInfos;
         private static POINTER_PEN_INFO[]? s_historyPenInfos;
         private static POINTER_INFO[]? s_historyInfos;
@@ -1484,7 +1485,7 @@ namespace Avalonia.Win32
                 else
                     style &= ~WindowStyles.WS_MAXIMIZEBOX;
 
-                const WindowStyles fullDecorationFlags = WindowStyles.WS_CAPTION | WindowStyles.WS_BORDER;
+                const WindowStyles fullDecorationFlags = WindowStyles.WS_CAPTION | WindowStyles.WS_BORDER | WindowStyles.WS_SYSMENU;
 
                 if (newProperties.Decorations == SystemDecorations.Full)
                 {
@@ -1740,6 +1741,12 @@ namespace Avalonia.Win32
             public PixelSize Size => PixelSize.FromSize(_owner.ClientSize, Scaling);
 
             public double Scaling => _owner.RenderScaling;
+        }
+
+        private struct InternalPoint
+        {
+            public int Time;
+            public PixelPoint Pt;
         }
     }
 }

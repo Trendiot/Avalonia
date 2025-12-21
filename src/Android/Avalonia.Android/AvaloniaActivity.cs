@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.Versioning;
 using Android.App;
@@ -7,6 +8,7 @@ using Android.Content.PM;
 using Android.OS;
 using Android.Runtime;
 using Android.Views;
+using Android.Window;
 using AndroidX.AppCompat.App;
 using Avalonia.Android.Platform;
 using Avalonia.Android.Platform.Storage;
@@ -26,6 +28,7 @@ public class AvaloniaActivity : AppCompatActivity, IAvaloniaActivity
     private object? _content;
     private bool _contentViewSet;
     internal AvaloniaView? _view;
+    private BackPressedCallback? _currentBackPressedCallback;
 
     public Action<int, Result, Intent?>? ActivityResult { get; set; }
     public Action<int, string[], Permission[]>? RequestPermissionsResult { get; set; }
@@ -77,6 +80,13 @@ public class AvaloniaActivity : AppCompatActivity, IAvaloniaActivity
     [ObsoletedOSPlatform("android33.0")]
     public override void OnBackPressed()
     {
+        // For now, if target sdk version is api 36, skip raising BackRequested on OnBackPressed.
+        // This behavior would be different for Net 10
+        if (OperatingSystem.IsAndroidVersionAtLeast(33) 
+            && Build.VERSION.SdkInt >= (BuildVersionCodes)36 
+            && ApplicationContext?.ApplicationInfo?.TargetSdkVersion >= (BuildVersionCodes)36)
+            return;
+
         var eventArgs = new AndroidBackRequestedEventArgs();
 
         BackRequested?.Invoke(this, eventArgs);
@@ -120,12 +130,25 @@ public class AvaloniaActivity : AppCompatActivity, IAvaloniaActivity
     protected override void OnStop()
     {
         _onDeactivated?.Invoke(this, new ActivatedEventArgs(ActivationKind.Background));
+
+        if (OperatingSystem.IsAndroidVersionAtLeast(33))
+        {
+            _currentBackPressedCallback?.Remove();
+            _currentBackPressedCallback = null;
+        }
+
         base.OnStop();
     }
 
     protected override void OnStart()
     {
         _onActivated?.Invoke(this, new ActivatedEventArgs(ActivationKind.Background));
+
+        if (OperatingSystem.IsAndroidVersionAtLeast(33))
+        {
+            _currentBackPressedCallback = new BackPressedCallback(this);
+            OnBackPressedDispatcher.AddCallback(this, _currentBackPressedCallback);
+        }
         base.OnStart();
     }
 
@@ -184,6 +207,13 @@ public class AvaloniaActivity : AppCompatActivity, IAvaloniaActivity
         }
 
         _view = new AvaloniaView(this) { Content = initialContent };
+    }
+
+    public void OnBackInvoked()
+    {
+        var eventArgs = new AndroidBackRequestedEventArgs();
+
+        BackRequested?.Invoke(this, eventArgs);
     }
 
     private class GlobalLayoutListener : Java.Lang.Object, ViewTreeObserver.IOnGlobalLayoutListener
