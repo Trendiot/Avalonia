@@ -285,11 +285,9 @@ namespace Avalonia.Controls.Primitives
 
         protected override Size MeasureOverride(Size availableSize)
         {
-            //NOTE: This causes issues when TimePicker is in a scrollviewer with custom content.
-            //Reverting to throwing an exception isn't a solution as a scrollviewer presents an unlimited viewport.
-            // if (double.IsInfinity(availableSize.Width) ||
-            //     double.IsInfinity(availableSize.Height))
-            //     throw new InvalidOperationException("Panel must have finite height");
+            if (double.IsInfinity(availableSize.Width) ||
+                double.IsInfinity(availableSize.Height))
+                throw new InvalidOperationException("Panel must have finite height");
 
             if (!_hasInit)
                 UpdateHelperInfo();
