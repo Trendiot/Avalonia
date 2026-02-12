@@ -11,6 +11,7 @@
     IAvnAutomationPeer* _peer;
     AvnAutomationNode* _node;
     NSMutableArray* _children;
+    NSArray<NSString*>* _attributeNames;
 }
 
 + (NSAccessibilityElement *)acquire:(IAvnAutomationPeer *)peer
@@ -126,11 +127,70 @@
         case AutomationHeaderItem:  return NSAccessibilityButtonRole;
         case AutomationTable: return NSAccessibilityTableRole;
         case AutomationTitleBar: return NSAccessibilityGroupRole;
+        case AutomationExpander: return NSAccessibilityDisclosureTriangleRole;
         // Treat unknown roles as generic group container items. Returning
         // NSAccessibilityUnknownRole is also possible but makes the screen
        // reader focus on the item instead of passing focus to child items.
         default: return NSAccessibilityGroupRole;
     }
+}
+
+- (NSAccessibilitySubrole)accessibilitySubrole
+{
+    auto landmarkType = _peer->GetLandmarkType();
+    switch (landmarkType) {
+        case LandmarkBanner: return @"AXLandmarkBanner";
+        case LandmarkComplementary: return @"AXLandmarkComplementary";
+        case LandmarkContentInfo: return @"AXLandmarkContentInfo";
+        case LandmarkRegion: return @"AXLandmarkRegion";
+        case LandmarkForm: return @"AXLandmarkForm";
+        case LandmarkMain: return @"AXLandmarkMain";
+        case LandmarkNavigation: return @"AXLandmarkNavigation";
+        case LandmarkSearch: return @"AXLandmarkSearch";
+        default: return NSAccessibilityUnknownSubrole;
+    }
+}
+
+- (NSString *)accessibilityRoleDescription
+{
+    auto landmarkType = _peer->GetLandmarkType();
+    switch (landmarkType) {
+        case LandmarkBanner: return @"banner";
+        case LandmarkComplementary: return @"complementary";
+        case LandmarkContentInfo: return @"content";
+        case LandmarkRegion: return @"region";
+        case LandmarkForm: return @"form";
+        case LandmarkMain: return @"main";
+        case LandmarkNavigation: return @"navigation";
+        case LandmarkSearch: return @"search";
+    }
+    return NSAccessibilityRoleDescription([self accessibilityRole], [self accessibilitySubrole]);
+}
+
+// Note: Apple has deprecated this API, but it's still used to set attributes not supported by NSAccessibility
+- (NSArray<NSString *> *)accessibilityAttributeNames
+{
+    if (_attributeNames == nil)
+    {
+        _attributeNames = @[
+            @"AXARIALive", // kAXARIALiveAttribute
+        ];
+    }
+    return _attributeNames;
+}
+
+- (id)accessibilityAttributeValue:(NSAccessibilityAttributeName)attribute
+{
+    if ([attribute isEqualToString:@"AXARIALive" /* kAXARIALiveAttribute */])
+    {
+        switch (_peer->GetLiveSetting())
+        {
+            case LiveSettingPolite: return @"polite";
+            case LiveSettingAssertive: return @"assertive";
+        }
+        return nil;
+    }
+    return nil;
 }
 
 - (NSString *)accessibilityIdentifier
@@ -388,8 +448,15 @@
         @{ NSAccessibilityUIElementsKey: [changed allObjects]});
 }
 
-- (void)raisePropertyChanged
+- (void)raisePropertyChanged:(AvnAutomationProperty)property
 {
+    if (property == AutomationPeer_Name && _peer->GetLiveSetting() != LiveSettingOff)
+        [self raiseLiveRegionChanged];
+}
+
+- (void)raiseLiveRegionChanged
+{
+    NSAccessibilityPostNotification(self, @"AXLiveRegionChanged" /* kAXLiveRegionChangedNotification */);
 }
 
 - (void)setAccessibilityFocused:(BOOL)accessibilityFocused

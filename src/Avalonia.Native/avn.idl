@@ -652,6 +652,20 @@ enum AvnAutomationControlType
     AutomationTable,
     AutomationTitleBar,
     AutomationSeparator,
+    AutomationExpander,
+}
+
+enum AvnLandmarkType
+{
+    LandmarkNone = -1,
+    LandmarkBanner,
+    LandmarkComplementary,
+    LandmarkContentInfo,
+    LandmarkRegion,
+    LandmarkForm,
+    LandmarkMain,
+    LandmarkNavigation,
+    LandmarkSearch,
 }
 
 enum AvnWindowTransparencyMode
@@ -673,6 +687,13 @@ enum AvnPointerDeviceType
 {
     Mouse,
     Pen,
+}
+
+enum AvnLiveSetting
+{
+    LiveSettingOff,
+    LiveSettingPolite,
+    LiveSettingAssertive,
 }
 
 [uuid(809c652e-7396-11d2-9771-00a0c9b4d50c)]
@@ -1307,7 +1328,11 @@ interface IAvnAutomationPeer : IUnknown
      void ValueProvider_SetValue([const] char* value);
 
      IAvnString* GetHelpText();
+
+     AvnLandmarkType GetLandmarkType();
      int GetHeadingLevel();
+
+     AvnLiveSetting GetLiveSetting();
 }
 
 [uuid(b00af5da-78af-4b33-bfff-4ce13a6239a9)]

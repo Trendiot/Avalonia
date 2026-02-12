@@ -277,6 +277,15 @@ internal enum UiaControlTypeId
     AppBar
 };
 
+internal enum UiaLandmarkType
+{
+    Custom = 80000,
+    Form,
+    Main,
+    Navigation,
+    Search,
+};
+
 internal enum UiaHeadingLevel
 {
     None = 80050,
@@ -289,6 +298,13 @@ internal enum UiaHeadingLevel
     Level7,
     Level8,
     Level9
+};
+
+internal enum UiaLiveSetting
+{
+    Off = 0,
+    Polite,
+    Assertive,
 };
 
 #if NET8_0_OR_GREATER
