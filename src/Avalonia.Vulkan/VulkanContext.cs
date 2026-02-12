@@ -9,12 +9,16 @@ internal class VulkanContext : IVulkanPlatformGraphicsContext
 {
     private readonly IVulkanKhrSurfacePlatformSurfaceFactory? _surfaceFactory;
     private readonly VulkanExternalObjectsFeature? _externalObjectsFeature;
+    private readonly Action<Action>? _onPresentFence;
+    private readonly bool _isDynamicMode;
     public IVulkanDevice Device { get; }
     public IVulkanInstance Instance => Device.Instance;
     
-    public VulkanContext(IVulkanDevice device, Dictionary<Type, object> platformFeatures)
+    public VulkanContext(IVulkanDevice device, Dictionary<Type, object> platformFeatures, Action<Action>? onPresentFence = null, bool isDynamicMode = false)
     {
         Device = device;
+        _onPresentFence = onPresentFence;
+        _isDynamicMode = isDynamicMode;
         using (device.Lock())
         {
             InstanceApi = new VulkanInstanceApi(device.Instance);
@@ -36,6 +40,12 @@ internal class VulkanContext : IVulkanPlatformGraphicsContext
         
     }
 
+    public void SetPresentFence(Action fenceWaitAction)
+    {
+        // Pass the fence wait action to the render timer for VSync synchronization
+        _onPresentFence?.Invoke(fenceWaitAction);
+    }
+    
     public object? TryGetFeature(Type featureType)
     {
         if (featureType == typeof(IVulkanContextExternalObjectsFeature))
@@ -65,7 +75,7 @@ internal class VulkanContext : IVulkanPlatformGraphicsContext
                 khrSurface = _surfaceFactory.CreateSurface(this, surf);
             else 
                 continue;
-            return new VulkanKhrRenderTarget(khrSurface, this);
+            return new VulkanKhrRenderTarget(khrSurface, this, _isDynamicMode);
         }
 
         throw new VulkanException("Unable to find a suitable platform surface");
