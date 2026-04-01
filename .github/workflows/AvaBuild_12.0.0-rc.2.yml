@@ -16,7 +16,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          ref: release/12.0.0-rc1_Rendering
+          ref: release/12.0.0-rc2_Rendering
           submodules: recursive  # fetches submodules recursively
           fetch-depth: 0     
 
@@ -30,7 +30,7 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Run Build
-        run: ./build.sh CreateNugetPackages --configuration Release --force-nuget-version 12.0.0.${{ github.run_number }}-rc.1
+        run: ./build.sh CreateNugetPackages --configuration Release --force-nuget-version 12.0.0.${{ github.run_number }}-rc.2
         shell: bash
 
       - name: Upload package as artifact
