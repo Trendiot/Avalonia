@@ -46,7 +46,14 @@ namespace Avalonia.Skia
         }
         
         public PlatformRenderTargetState PlatformRenderTargetState => _renderTarget.State;
-        public RenderTargetProperties Properties { get; }
+        public RenderTargetProperties Properties { get; } = new()
+        {
+            // Vulkan render targets support direct rendering (Skia has stencil via VkImage).
+            // Setting this avoids the intermediate layer path, which enables
+            // CompositionVulkanVisual to access the DirectRenderContext.
+            IsSuitableForDirectRendering = true,
+            RetainsPreviousFrameContents = true,
+        };
 
 
     }
