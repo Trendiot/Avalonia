@@ -245,7 +245,7 @@ namespace Avalonia.Rendering.Composition
             RequestCommitAsync();
         }
 
-        internal void PostServerJob(Action job, bool postTarget = false)
+        public void PostServerJob(Action job, bool postTarget = false)
         {
             Dispatcher.VerifyAccess();
             (postTarget ? _pendingServerCompositorPostTargetJobs : _pendingServerCompositorJobs).Add(job);
