@@ -83,11 +83,13 @@ internal sealed class ServerCompositionVulkanVisual : ServerCompositionContainer
             proxy.Flush();
         }
 
-        // Flush Skia's GPU work so our Vulkan commands don't race with Skia's
+        // Flush and sync the GPU context (Skia's GrContext)
         ctx.DirectRenderContext?.FlushAndSync();
 
         try
         {
+            // Delegate to the handler — it receives the full render context
+            // and extracts Vulkan-typed info in the platform-specific subclass
             _handler.OnDirectRender(ctx);
         }
         catch (Exception e)
@@ -96,11 +98,8 @@ internal sealed class ServerCompositionVulkanVisual : ServerCompositionContainer
                 ?.Log(_handler, $"Exception in {_handler.GetType().Name}.OnRender {{0}}", e);
         }
 
-        // Only reset if there are more visuals after us that use Skia.
-        // ResetContext() is expensive — it forces Skia to re-query all Vulkan state.
-        // For a full-surface plot this is the only visual, so skip it.
-        // If Skia visuals render after this and show artifacts, re-enable.
-        // ctx.DirectRenderContext?.ResetContext();
+        // Reset graphics context so Skia re-queries GPU state
+        ctx.DirectRenderContext?.ResetContext();
 
         if (proxy != null)
             proxy.AutoFlush = false;
