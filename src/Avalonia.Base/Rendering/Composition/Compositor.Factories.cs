@@ -37,8 +37,6 @@ public partial class Compositor
 
     public CompositionCustomVisual CreateCustomVisual(CompositionCustomVisualHandler handler) => new(this, handler);
 
-    public CompositionVulkanVisual CreateVulkanVisual(CompositionVulkanVisualHandler handler) => new(this, handler);
-
     public CompositionSurfaceVisual CreateSurfaceVisual() => new(this, new ServerCompositionSurfaceVisual(_server));
 
     public CompositionDrawingSurface CreateDrawingSurface() => new(this);

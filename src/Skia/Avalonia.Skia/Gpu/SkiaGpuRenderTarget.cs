@@ -38,8 +38,7 @@ namespace Avalonia.Skia
                 Dpi = SkiaPlatform.DefaultDpi * session.ScaleFactor,
                 ScaleDrawingToDpi = false,
                 Gpu = _skiaGpu,
-                CurrentSession = session,
-                DirectRenderContext = (session as Vulkan.VulkanSkiaRenderTarget.VulkanSkiaRenderSession)?.DirectRenderContext
+                CurrentSession =  session
             };
 
             return new DrawingContextImpl(nfo, session);
