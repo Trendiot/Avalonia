@@ -65,7 +65,7 @@ class VulkanSkiaRenderTarget : ISkiaGpuRenderTarget
                 throw new InvalidOperationException(
                     $"Surface can't be created with the provided render target");
             success = true;
-            return new VulkanSkiaRenderSession(_gpu.GrContext, surface, session);
+            return new VulkanSkiaRenderSession(_gpu.GrContext, surface, session, _gpu.Vulkan.Device);
         }
         finally
         {
@@ -83,12 +83,14 @@ class VulkanSkiaRenderTarget : ISkiaGpuRenderTarget
 
         public VulkanSkiaRenderSession(GRContext grContext,
             SKSurface surface,
-            IVulkanRenderSession vulkanSession)
+            IVulkanRenderSession vulkanSession,
+            IVulkanDevice device)
         {
             GrContext = grContext;
             SkSurface = surface;
             _vulkanSession = vulkanSession;
             SurfaceOrigin = vulkanSession.IsYFlipped ? GRSurfaceOrigin.TopLeft : GRSurfaceOrigin.BottomLeft;
+            DirectRenderContext = new VulkanSkiaDirectRenderContext(vulkanSession.ImageInfo, device, grContext);
         }
 
         public void Dispose()
@@ -103,5 +105,6 @@ class VulkanSkiaRenderTarget : ISkiaGpuRenderTarget
         public SKSurface SkSurface { get; }
         public double ScaleFactor => _vulkanSession.Scaling;
         public GRSurfaceOrigin SurfaceOrigin { get; }
+        public VulkanSkiaDirectRenderContext DirectRenderContext { get; }
     }
 }

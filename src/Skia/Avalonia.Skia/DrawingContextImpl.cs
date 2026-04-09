@@ -41,6 +41,7 @@ namespace Avalonia.Skia
         private readonly SKPaint _boxShadowPaint = SKPaintCache.Shared.Get();
         private static SKShader? s_acrylicNoiseShader;
         private readonly ISkiaGpuRenderSession? _session;
+        private readonly Rendering.Composition.Server.ICompositionDirectRenderContext? _directRenderContext;
         private bool _leased;
         private bool _useOpacitySaveLayer;
 
@@ -85,6 +86,11 @@ namespace Avalonia.Skia
             public ISkiaGpu? Gpu;
 
             public ISkiaGpuRenderSession? CurrentSession;
+
+            /// <summary>
+            /// Optional direct render context for bypassing Skia (e.g. direct Vulkan rendering).
+            /// </summary>
+            public Rendering.Composition.Server.ICompositionDirectRenderContext? DirectRenderContext;
         }
 
         private class SkiaLeaseFeature : ISkiaSharpApiLeaseFeature
@@ -197,8 +203,9 @@ namespace Avalonia.Skia
             Surface = createInfo.Surface;
 
             _session = createInfo.CurrentSession;
+            _directRenderContext = createInfo.DirectRenderContext;
 
-            
+
             if (createInfo.ScaleDrawingToDpi && !createInfo.Dpi.NearlyEquals(SkiaPlatform.DefaultDpi))
             {
                 _postTransform =
@@ -898,6 +905,8 @@ namespace Avalonia.Skia
         {
             if (t == typeof(ISkiaSharpApiLeaseFeature))
                 return new SkiaLeaseFeature(this);
+            if (t == typeof(Rendering.Composition.Server.ICompositionDirectRenderContext))
+                return _directRenderContext;
             return null;
         }
 

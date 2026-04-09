@@ -68,6 +68,8 @@ internal class VulkanSkiaGpu : ISkiaGpu
     {
         if (featureType == typeof(IExternalObjectsRenderInterfaceContextFeature))
             return _externalObjects;
+        if (featureType == typeof(IVulkanPlatformGraphicsContext))
+            return Vulkan;
         return null;
     }
 

@@ -28,6 +28,7 @@ internal class SkiaContext : IPlatformRenderInterfaceContext
             // TODO12: extend ISkiaGpu with PublicFeatures instead
             TryFeature<IOpenGlTextureSharingRenderInterfaceContextFeature>();
             TryFeature<IExternalObjectsRenderInterfaceContextFeature>();
+            TryFeature<global::Avalonia.Vulkan.IVulkanPlatformGraphicsContext>();
             using (var gr = gpu.TryGetGrContext())
             {
                 var renderTargetSize = gr?.Value.MaxRenderTargetSize;
