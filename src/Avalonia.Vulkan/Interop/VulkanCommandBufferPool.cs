@@ -55,8 +55,13 @@ internal class VulkanCommandBufferPool : IDisposable
 
     public unsafe VulkanCommandBuffer CreateCommandBuffer()
     {
-        if (_autoFree)
-            FreeFinishedCommandBuffers();
+        // NOTE: do NOT call FreeFinishedCommandBuffers here even in _autoFree mode.
+        // FreeFinishedCommandBuffers DISPOSES finished CBs (vkFreeCommandBuffers +
+        // vkDestroyFence) — which would run before the recycle scan below, draining
+        // the queue and forcing a fresh vkAllocateCommandBuffers + vkCreateFence on
+        // every call. That hits Mesa's driver-side allocator periodically (10-30ms
+        // stalls). The recycle scan handles bounding the queue size by reusing
+        // finished CBs, so the autoFree contract is satisfied without disposal churn.
 
         // Recycle a finished command buffer if any is available. Allocating a fresh
         // command buffer + fence per frame (vkAllocateCommandBuffers + vkCreateFence)
