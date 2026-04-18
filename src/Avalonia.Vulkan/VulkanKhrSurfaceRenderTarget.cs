@@ -126,12 +126,13 @@ internal class VulkanKhrRenderTarget : IVulkanRenderTarget
     public IVulkanRenderSession BeginDraw()
     {
         var l = _context.EnsureCurrent();
-        // Non-blocking pool drain. FreeUsedCommandBuffers blocks on _fence.Wait() with no
-        // timeout for every queued command buffer; under FIFO_KHR pacing the GPU is
-        // typically still processing the previous submit, which made BeginDraw stall a
-        // full vsync cycle (or more under burst). FreeFinishedCommandBuffers only
-        // disposes already-signaled CBs, leaving in-flight ones queued for next frame.
-        _display.CommandBufferPool.FreeFinishedCommandBuffers();
+        // Do NOT drain finished command buffers here. The pool's CreateCommandBuffer
+        // recycles finished CBs in-place via vkResetCommandBuffer, which avoids the
+        // periodic 10-22ms stalls that vkAllocateCommandBuffers + vkCreateFence cause
+        // when Mesa's driver-side freelists need maintenance. If we drain here, the
+        // queue is empty by the time CreateCommandBuffer runs, defeating the recycle
+        // path. The pool grows once to its steady-state in-flight depth (typically 2-4
+        // CBs) then never allocates again.
         if (_display.EnsureSwapchainAvailable() || _image == null)
         {
             DestroyImage();
