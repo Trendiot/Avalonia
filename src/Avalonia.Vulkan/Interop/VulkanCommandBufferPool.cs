@@ -58,20 +58,29 @@ internal class VulkanCommandBufferPool : IDisposable
         if (_autoFree)
             FreeFinishedCommandBuffers();
 
-        // Recycle a finished command buffer if one is available. Allocating a fresh
+        // Recycle a finished command buffer if any is available. Allocating a fresh
         // command buffer + fence per frame (vkAllocateCommandBuffers + vkCreateFence)
         // periodically stalls 10-22ms on Mesa as the driver maintains its internal
         // freelists. Reusing avoids both calls in steady state. The pool was created
         // with VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT so per-CB reset is legal.
-        if (_commandBuffers.Count > 0)
+        //
+        // We must scan the WHOLE queue rather than just the head: when CBs are submitted
+        // with wait-semaphore dependencies (e.g. SubmitSemaphore in
+        // VulkanExternalObjectsFeature for SnapshotWithSemaphores), their fences only
+        // signal AFTER the user-supplied semaphore signals. If those semaphores are
+        // periodically late, the head can be unfinished while later CBs are done. Only
+        // checking head would force allocation in that case, defeating the recycle.
+        int count = _commandBuffers.Count;
+        for (int i = 0; i < count; i++)
         {
-            var head = _commandBuffers.Peek();
-            if (head.IsFinished)
+            var cb = _commandBuffers.Dequeue();
+            if (cb.IsFinished)
             {
-                _commandBuffers.Dequeue();
-                head.Reset();
-                return head;
+                cb.Reset();
+                return cb;
             }
+            // Not finished yet; re-enqueue so we keep checking on subsequent calls.
+            _commandBuffers.Enqueue(cb);
         }
 
         var commandBufferAllocateInfo = new VkCommandBufferAllocateInfo
