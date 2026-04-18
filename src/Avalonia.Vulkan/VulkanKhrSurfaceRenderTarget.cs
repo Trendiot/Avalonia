@@ -200,19 +200,22 @@ internal class VulkanKhrRenderTarget : IVulkanRenderTarget
 
         // (b) EnsureSwapchainAvailable — size check; on swapchainOutOfDate or surface
         //     size change, RecreateSwapchain (which calls DeviceWaitIdle) runs.
-        bool needRecreate = _display.EnsureSwapchainAvailable() || _image == null;
+        bool ensureRecreate = _display.EnsureSwapchainAvailable();
         long t2 = Stopwatch.GetTimestamp();
         DiagBdEnsureMs = (t2 - t1) * tickToMs;
 
-        // (c)/(d) Recreate path or per-frame transition. Track which path and time it.
-        DiagBdRecreated = needRecreate;
-        if (needRecreate)
+        // (c)/(d) Recreate path or per-frame transition. Inline the _image null check in
+        // the if-condition so the nullable analyzer carries the non-null fact into the
+        // else branch (matches the original code structure).
+        if (ensureRecreate || _image == null)
         {
+            DiagBdRecreated = true;
             DestroyImage();   // calls DeviceWaitIdle
             CreateImage();    // allocates + initial transition (creates a CB)
         }
         else
         {
+            DiagBdRecreated = false;
             _image.TransitionLayout(VkImageLayout.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 VkAccessFlags.VK_ACCESS_NONE);
         }
