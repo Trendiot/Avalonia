@@ -178,34 +178,63 @@ internal class VulkanDisplay : IDisposable
                 height = height
             };
         }
-        // Present mode selection with priority for VSync modes
-        VkPresentModeKHR presentMode;
-        if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR))
-        { 
-            // Best: Triple buffering with VSync - low latency, no tearing
-            presentMode = VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR;
-        }
-        else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_FIFO_RELAXED_KHR))
+        // Present mode selection. Allow an env-var override for jitter testing:
+        //   AVALONIA_VULKAN_PRESENT_MODE = immediate | mailbox | fifo | fifo_relaxed
+        // If the requested mode isn't advertised by the driver, we fall through to the
+        // normal priority order below.
+        VkPresentModeKHR presentMode = default;
+        bool overrideApplied = false;
+        var envOverride = Environment.GetEnvironmentVariable("AVALONIA_VULKAN_PRESENT_MODE");
+        if (!string.IsNullOrEmpty(envOverride))
         {
-            // Good: Adaptive VSync - tears only when frame rate drops
-            presentMode = VkPresentModeKHR.VK_PRESENT_MODE_FIFO_RELAXED_KHR;
-        }
-        else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_FIFO_KHR))
-        {
-            // Standard: Traditional VSync - guaranteed to be available
-            presentMode = VkPresentModeKHR.VK_PRESENT_MODE_FIFO_KHR;
-        }
-        else
-        {
-            // Fallback: Immediate mode (allows tearing) - only if nothing else available
-            presentMode = VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR;
+            VkPresentModeKHR? requested = envOverride.Trim().ToLowerInvariant() switch
+            {
+                "immediate"    => VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR,
+                "mailbox"      => VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR,
+                "fifo"         => VkPresentModeKHR.VK_PRESENT_MODE_FIFO_KHR,
+                "fifo_relaxed" => VkPresentModeKHR.VK_PRESENT_MODE_FIFO_RELAXED_KHR,
+                _              => null,
+            };
+            if (requested.HasValue && modes.Contains(requested.Value))
+            {
+                presentMode = requested.Value;
+                overrideApplied = true;
+            }
+            else
+            {
+                Console.Error.WriteLine(
+                    $"[GPU] AVALONIA_VULKAN_PRESENT_MODE='{envOverride}' not honored "
+                    + $"(parsed={requested}, advertised=[{string.Join(",", modes)}]); using default priority.");
+            }
         }
 
-        // Print which present mode the WSI actually accepted, and the full set advertised.
-        // Mesa's MESA_VK_WSI_PRESENT_MODE env var works by limiting which modes are
-        // advertised here, so this line is the unequivocal proof of what's in effect.
+        if (!overrideApplied)
+        {
+            if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR))
+            {
+                // Best: Triple buffering with VSync - low latency, no tearing
+                presentMode = VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR;
+            }
+            else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_FIFO_RELAXED_KHR))
+            {
+                // Good: Adaptive VSync - tears only when frame rate drops
+                presentMode = VkPresentModeKHR.VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+            }
+            else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_FIFO_KHR))
+            {
+                // Standard: Traditional VSync - guaranteed to be available
+                presentMode = VkPresentModeKHR.VK_PRESENT_MODE_FIFO_KHR;
+            }
+            else
+            {
+                // Fallback: Immediate mode (allows tearing) - only if nothing else available
+                presentMode = VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR;
+            }
+        }
+
         Console.Error.WriteLine(
-            $"[GPU] Present mode SELECTED: {presentMode}; AVAILABLE: [{string.Join(",", modes)}]; imageCount={imageCount}");
+            $"[GPU] Present mode SELECTED: {presentMode}{(overrideApplied ? " (env-override)" : "")}; "
+            + $"AVAILABLE: [{string.Join(",", modes)}]; imageCount={imageCount}");
 
         var swapchainCreateInfo = new VkSwapchainCreateInfoKHR
         {
