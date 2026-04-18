@@ -143,6 +143,25 @@ internal unsafe partial class VulkanDeviceApi
     [GetProcAddress("vkQueuePresentKHR")]
     public partial VkResult vkQueuePresentKHR(VkQueue queue, ref VkPresentInfoKHR pPresentInfo);
 
+    [GetProcAddress("vkCreateQueryPool")]
+    public partial VkResult CreateQueryPool(VkDevice device, ref VkQueryPoolCreateInfo pCreateInfo,
+        IntPtr pAllocator, out VkQueryPool pQueryPool);
+
+    [GetProcAddress("vkDestroyQueryPool")]
+    public partial void DestroyQueryPool(VkDevice device, VkQueryPool queryPool, IntPtr pAllocator);
+
+    [GetProcAddress("vkCmdResetQueryPool")]
+    public partial void CmdResetQueryPool(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+        uint32_t firstQuery, uint32_t queryCount);
+
+    [GetProcAddress("vkCmdWriteTimestamp")]
+    public partial void CmdWriteTimestamp(VkCommandBuffer commandBuffer, VkPipelineStageFlags pipelineStage,
+        VkQueryPool queryPool, uint32_t query);
+
+    [GetProcAddress("vkGetQueryPoolResults")]
+    public partial VkResult GetQueryPoolResults(VkDevice device, VkQueryPool queryPool, uint32_t firstQuery,
+        uint32_t queryCount, IntPtr dataSize, void* pData, VkDeviceSize stride, VkQueryResultFlags flags);
+
     [GetProcAddress("vkImportSemaphoreFdKHR", true)]
     public partial VkResult ImportSemaphoreFdKHR(VkDevice device, VkImportSemaphoreFdInfoKHR* pImportSemaphoreFdInfo);
 

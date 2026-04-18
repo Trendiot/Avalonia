@@ -1982,6 +1982,22 @@ namespace Avalonia.Vulkan.UnmanagedInterop
         VK_FILTER_CUBIC_IMG = VK_FILTER_CUBIC_EXT,
     }
 
+    enum VkQueryType
+    {
+        VK_QUERY_TYPE_OCCLUSION = 0,
+        VK_QUERY_TYPE_PIPELINE_STATISTICS = 1,
+        VK_QUERY_TYPE_TIMESTAMP = 2,
+    }
+
+    [Flags]
+    enum VkQueryResultFlags
+    {
+        VK_QUERY_RESULT_64_BIT = 0x00000001,
+        VK_QUERY_RESULT_WAIT_BIT = 0x00000002,
+        VK_QUERY_RESULT_WITH_AVAILABILITY_BIT = 0x00000004,
+        VK_QUERY_RESULT_PARTIAL_BIT = 0x00000008,
+    }
+
     [Flags]
     enum VkDebugUtilsMessageSeverityFlagsEXT
     {

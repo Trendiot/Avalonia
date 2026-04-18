@@ -88,6 +88,21 @@ namespace Avalonia.Vulkan.UnmanagedInterop
     {
         public ulong Handle;
     }
+
+    struct VkQueryPool
+    {
+        public ulong Handle;
+    }
+
+    unsafe struct VkQueryPoolCreateInfo
+    {
+        public VkStructureType sType;
+        public IntPtr pNext;
+        public uint32_t flags;
+        public VkQueryType queryType;
+        public uint32_t queryCount;
+        public uint32_t pipelineStatistics;
+    }
     
     struct VkCommandBuffer
     {

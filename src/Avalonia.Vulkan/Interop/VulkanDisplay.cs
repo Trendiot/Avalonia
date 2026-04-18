@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using Avalonia.Vulkan.UnmanagedInterop;
@@ -24,7 +25,52 @@ internal class VulkanDisplay : IDisposable
     public PixelSize Size { get; private set; }
     private VulkanFence? _presentFence;
     private bool _swapchainOutOfDate;
-    
+
+    // --- GPU-timeline jitter diagnostic ---------------------------------------------------
+    // Each frame writes two GPU timestamps (top-of-pipe before blit, bottom-of-pipe after
+    // blit) into a ring of VkQueryPool slots. Each frame also records CPU timestamps
+    // around vkQueueSubmit and vkQueuePresentKHR. After the next frame's GPU work has had
+    // time to complete (we read back DiagRingDepth-1 frames behind), we resolve the GPU
+    // timestamps and combine with the CPU samples for that same frame to produce a
+    // per-frame breakdown:
+    //   gpu_work    = (gpu_end_tick - gpu_start_tick) * timestampPeriod
+    //                 -> the actual time the GPU spent executing OUR command buffer.
+    //                    A periodic increase here proves cross-process GPU contention.
+    //   submit_cpu  = how long vkQueueSubmit blocked on the CPU
+    //                 -> non-zero means driver-side queue contention.
+    //   present_cpu = how long vkQueuePresentKHR blocked on the CPU
+    //                 -> non-zero under FIFO_KHR means WSI back-pressure surfaced here
+    //                    (rare; usually back-pressure surfaces in vkAcquireNextImageKHR).
+    //   wall_total  = wall-clock interval between successive present_returned timestamps
+    //                 -> the visible frame interval.
+    // The "missing" time (wall_total - gpu_work - submit_cpu - present_cpu) is everything
+    // upstream (Avalonia compositor, Skia draw, render scheduler).
+    private const int    DiagRingDepth        = 8;          // frames of history kept
+    private const double DiagJitterThresholdMs = 9.0;
+    private const int    DiagWorstPerWindow    = 5;
+    private VkQueryPool _diagQueryPool;
+    private float       _diagTimestampPeriodNs;             // ns per GPU tick (from physical device limits)
+    private uint        _diagTimestampValidBits;            // 0 == no valid bits => disabled
+    private long        _diagFrameCount;          // monotonic, never reset; used as ring index
+    private long        _diagFramesInWindow;      // reset each 1s report window
+    private long        _diagJitterCount;
+    private long        _diagLastReportTs;
+    private long        _diagPrevReportFrameTs;
+    // Per-slot CPU samples captured at submit/present time, indexed by frameNum % DiagRingDepth.
+    private readonly long[]   _diagCpuSubmitCallTs    = new long[DiagRingDepth];
+    private readonly long[]   _diagCpuSubmitDoneTs    = new long[DiagRingDepth];
+    private readonly long[]   _diagCpuPresentCallTs   = new long[DiagRingDepth];
+    private readonly long[]   _diagCpuPresentDoneTs   = new long[DiagRingDepth];
+    private readonly long[]   _diagFrameNos           = new long[DiagRingDepth];
+    private readonly bool[]   _diagSlotPopulated      = new bool[DiagRingDepth];
+    // Worst-N tracker for the 1s window; kept short to bound console I/O.
+    private readonly double[] _diagWorstWall          = new double[DiagWorstPerWindow];
+    private readonly double[] _diagWorstGpu           = new double[DiagWorstPerWindow];
+    private readonly double[] _diagWorstSubmitCpu     = new double[DiagWorstPerWindow];
+    private readonly double[] _diagWorstPresentCpu    = new double[DiagWorstPerWindow];
+    private readonly double[] _diagWorstUpstream      = new double[DiagWorstPerWindow];
+    private readonly long  [] _diagWorstFrameNo       = new long  [DiagWorstPerWindow];
+
     private VulkanDisplay(IVulkanPlatformGraphicsContext context, VulkanKhrSurface surface, VkSwapchainKHR swapchain,
         VkExtent2D swapchainExtent, IVulkanKhrSurfacePlatformSurface platformSurface, bool isDynamicMode)
     {
@@ -36,12 +82,40 @@ internal class VulkanDisplay : IDisposable
         _semaphorePair = new VulkanSemaphorePair(_context);
         CommandBufferPool = new VulkanCommandBufferPool(_context);
         CreateSwapchainImages();
-        
+
         // Create presentation fence for VSync synchronization in dynamic mode
         if (isDynamicMode)
         {
             _presentFence = new VulkanFence(_context, VkFenceCreateFlags.VK_FENCE_CREATE_SIGNALED_BIT);
         }
+
+        InitializeGpuTimingDiagnostic();
+    }
+
+    private void InitializeGpuTimingDiagnostic()
+    {
+        // Read timestampPeriod (ns/tick) and the valid-bit count for the graphics queue
+        // family. If validBits == 0, GPU timestamps aren't supported on this queue and we
+        // disable the diagnostic.
+        _context.InstanceApi.GetPhysicalDeviceProperties(_context.PhysicalDeviceHandle, out var props);
+        _diagTimestampPeriodNs = props.limits.timestampPeriod;
+        _diagTimestampValidBits = props.limits.timestampComputeAndGraphics != 0 ? 64u : 0u;
+        if (_diagTimestampValidBits == 0)
+        {
+            Console.Error.WriteLine("[GPU] Timestamps unsupported on graphics queue (timestampComputeAndGraphics=0); GPU diagnostic disabled.");
+            return;
+        }
+
+        var qpInfo = new VkQueryPoolCreateInfo
+        {
+            sType = VkStructureType.VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            queryType = VkQueryType.VK_QUERY_TYPE_TIMESTAMP,
+            queryCount = (uint)(DiagRingDepth * 2),
+        };
+        _context.DeviceApi.CreateQueryPool(_context.DeviceHandle, ref qpInfo, IntPtr.Zero, out _diagQueryPool)
+            .ThrowOnError("vkCreateQueryPool");
+        Console.Error.WriteLine(
+            $"[GPU] Diagnostic enabled. timestampPeriod={_diagTimestampPeriodNs:F2}ns/tick, ringDepth={DiagRingDepth}");
     }
 
     internal VkSurfaceFormatKHR SurfaceFormat
@@ -288,6 +362,15 @@ internal class VulkanDisplay : IDisposable
 
     internal unsafe void BlitImageToCurrentImage(VulkanCommandBuffer commandBuffer, VulkanImage image)
     {
+        // GPU timing: top-of-pipe before any work for this frame is recorded.
+        if (_diagTimestampValidBits != 0)
+        {
+            uint slot = (uint)((_diagFrameCount % DiagRingDepth) * 2);
+            _context.DeviceApi.CmdResetQueryPool(commandBuffer.Handle, _diagQueryPool, slot, 2);
+            _context.DeviceApi.CmdWriteTimestamp(commandBuffer.Handle,
+                VkPipelineStageFlags.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, _diagQueryPool, slot);
+        }
+
         VulkanMemoryHelper.TransitionLayout(_context, commandBuffer,
             image.Handle, image.CurrentLayout, VkAccessFlags.VK_ACCESS_NONE,
             VkImageLayout.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -341,6 +424,14 @@ internal class VulkanDisplay : IDisposable
             VkImageLayout.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
             VkAccessFlags.VK_ACCESS_NONE,
             1);
+
+        // GPU timing: bottom-of-pipe after all work for this frame is recorded.
+        if (_diagTimestampValidBits != 0)
+        {
+            uint slot = (uint)((_diagFrameCount % DiagRingDepth) * 2);
+            _context.DeviceApi.CmdWriteTimestamp(commandBuffer.Handle,
+                VkPipelineStageFlags.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, _diagQueryPool, slot + 1);
+        }
         
         // Submit with presentation fence for VSync synchronization in dynamic mode
         if (_presentFence.HasValue)
@@ -350,12 +441,14 @@ internal class VulkanDisplay : IDisposable
             _context.DeviceApi.ResetFences(_context.DeviceHandle, 1, &fence)
                 .ThrowOnError("vkResetFences");
         }
-        
+
+        long diagSubmitCallTs = Stopwatch.GetTimestamp();
         commandBuffer.Submit(new[] { _semaphorePair.ImageAvailableSemaphore },
             new[] { VkPipelineStageFlags.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT },
-            new[] { _semaphorePair.RenderFinishedSemaphore }, 
+            new[] { _semaphorePair.RenderFinishedSemaphore },
             _presentFence);
-        
+        long diagSubmitDoneTs = Stopwatch.GetTimestamp();
+
         var semaphore = _semaphorePair.RenderFinishedSemaphore.Handle;
         var swapchain = _swapchain;
         var nextImage = _nextImage;
@@ -371,8 +464,23 @@ internal class VulkanDisplay : IDisposable
             pImageIndices = &nextImage,
             pResults = &result
         };
-        
+
+        long diagPresentCallTs = Stopwatch.GetTimestamp();
         var presentResult = _context.DeviceApi.vkQueuePresentKHR(_context.MainQueueHandle, ref presentInfo);
+        long diagPresentDoneTs = Stopwatch.GetTimestamp();
+
+        // Stash CPU samples for THIS frame; readback of GPU timestamps for an OLDER frame
+        // happens at the bottom of EndPresentation.
+        if (_diagTimestampValidBits != 0)
+        {
+            int slot = (int)(_diagFrameCount % DiagRingDepth);
+            _diagCpuSubmitCallTs [slot] = diagSubmitCallTs;
+            _diagCpuSubmitDoneTs [slot] = diagSubmitDoneTs;
+            _diagCpuPresentCallTs[slot] = diagPresentCallTs;
+            _diagCpuPresentDoneTs[slot] = diagPresentDoneTs;
+            _diagFrameNos        [slot] = _diagFrameCount;
+            _diagSlotPopulated   [slot] = true;
+        }
         
         // Handle VK_ERROR_OUT_OF_DATE_KHR by recreating the swapchain
         // This can happen if the window is resized between acquire and present
@@ -385,6 +493,14 @@ internal class VulkanDisplay : IDisposable
             RecreateSwapchain();
             // Mark that the swapchain was recreated so the next BeginDraw knows to recreate the image
             _swapchainOutOfDate = true;
+            // Diagnostic: invalidate this slot so the readback skips it; advance counter
+            // to keep the ring index consistent with future frames.
+            if (_diagTimestampValidBits != 0)
+            {
+                int slot = (int)(_diagFrameCount % DiagRingDepth);
+                _diagSlotPopulated[slot] = false;
+                _diagFrameCount++;
+            }
             return;
         }
         
@@ -420,8 +536,114 @@ internal class VulkanDisplay : IDisposable
                 _presentFence.Value.Wait(100_000_000); // 100ms timeout
             });
         }
+
+        if (_diagTimestampValidBits != 0)
+        {
+            ReadbackAndReportPriorFrame();
+            _diagFrameCount++;
+        }
     }
-    
+
+    private unsafe void ReadbackAndReportPriorFrame()
+    {
+        // Read back the GPU timestamps for the frame DiagRingDepth-1 frames ago. By that
+        // point the GPU has had ample time to retire that frame's command buffer (with
+        // FIFO + 3 swapchain images, GPU is at most 3 frames behind, so 7 frames of
+        // history is more than enough headroom).
+        long targetFrame = _diagFrameCount - (DiagRingDepth - 1);
+        if (targetFrame < 0) return;
+        int slot = (int)(targetFrame % DiagRingDepth);
+        if (!_diagSlotPopulated[slot] || _diagFrameNos[slot] != targetFrame) return;
+
+        // Each slot has 2 timestamps: [start, end]. Read both with availability bit so
+        // we can skip cleanly if (somehow) the GPU hasn't retired yet.
+        // Layout per query (stride = 16 bytes): [value:u64, availability:u64]
+        ulong* data = stackalloc ulong[4]; // [start, startAvail, end, endAvail]
+        uint queryStart = (uint)(slot * 2);
+        VkResult res = _context.DeviceApi.GetQueryPoolResults(
+            _context.DeviceHandle, _diagQueryPool, queryStart, 2,
+            new IntPtr(sizeof(ulong) * 4), data, sizeof(ulong) * 2,
+            VkQueryResultFlags.VK_QUERY_RESULT_64_BIT
+            | VkQueryResultFlags.VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (res != VkResult.VK_SUCCESS && res != VkResult.VK_NOT_READY) return;
+        if (data[1] == 0 || data[3] == 0) return; // not yet available
+
+        ulong gpuStartTick = data[0];
+        ulong gpuEndTick   = data[2];
+        // Mask to validBits and handle wrap (rare but possible if hardware uses < 64 bits)
+        if (_diagTimestampValidBits < 64)
+        {
+            ulong mask = (1UL << (int)_diagTimestampValidBits) - 1;
+            gpuStartTick &= mask;
+            gpuEndTick   &= mask;
+        }
+        ulong gpuTicks = gpuEndTick >= gpuStartTick
+            ? gpuEndTick - gpuStartTick
+            : gpuEndTick + (1UL << (int)_diagTimestampValidBits) - gpuStartTick;
+        double gpuWorkMs = gpuTicks * _diagTimestampPeriodNs / 1_000_000.0;
+
+        double tickToMs   = 1000.0 / Stopwatch.Frequency;
+        double submitCpuMs  = (_diagCpuSubmitDoneTs [slot] - _diagCpuSubmitCallTs [slot]) * tickToMs;
+        double presentCpuMs = (_diagCpuPresentDoneTs[slot] - _diagCpuPresentCallTs[slot]) * tickToMs;
+        long   presentDoneTs = _diagCpuPresentDoneTs[slot];
+
+        // Wall-clock interval is the time between this frame's present-returned and the
+        // previous one's. The "upstream" portion is the residual after subtracting
+        // everything we measured locally; this is the time spent in
+        // Avalonia/Skia/scheduler/etc. between presents.
+        double wallTotalMs = 0;
+        double upstreamMs  = 0;
+        if (_diagPrevReportFrameTs != 0)
+        {
+            wallTotalMs = (presentDoneTs - _diagPrevReportFrameTs) * tickToMs;
+            upstreamMs  = wallTotalMs - gpuWorkMs - submitCpuMs - presentCpuMs;
+            if (upstreamMs < 0) upstreamMs = 0; // GPU work overlapped previous-frame CPU; rounding artifact
+        }
+        _diagPrevReportFrameTs = presentDoneTs;
+
+        if (wallTotalMs > DiagJitterThresholdMs)
+        {
+            _diagJitterCount++;
+            int worstIdx = 0;
+            for (int i = 1; i < DiagWorstPerWindow; i++)
+                if (_diagWorstWall[i] < _diagWorstWall[worstIdx]) worstIdx = i;
+            if (wallTotalMs > _diagWorstWall[worstIdx])
+            {
+                _diagWorstWall      [worstIdx] = wallTotalMs;
+                _diagWorstGpu       [worstIdx] = gpuWorkMs;
+                _diagWorstSubmitCpu [worstIdx] = submitCpuMs;
+                _diagWorstPresentCpu[worstIdx] = presentCpuMs;
+                _diagWorstUpstream  [worstIdx] = upstreamMs;
+                _diagWorstFrameNo   [worstIdx] = targetFrame;
+            }
+        }
+
+        _diagFramesInWindow++;
+        long now = Stopwatch.GetTimestamp();
+        if (_diagLastReportTs == 0) _diagLastReportTs = now;
+        double sinceReportMs = (now - _diagLastReportTs) * tickToMs;
+        if (sinceReportMs >= 1000.0)
+        {
+            Console.Error.WriteLine(
+                $"[GPU] 1s: frames={_diagFramesInWindow} jitter={_diagJitterCount} "
+                + $"avgFps={(_diagFramesInWindow * 1000.0 / sinceReportMs):F1}");
+            for (int i = 0; i < DiagWorstPerWindow; i++)
+            {
+                if (_diagWorstWall[i] <= 0) continue;
+                Console.Error.WriteLine(
+                    $"  worst#{i} f={_diagWorstFrameNo[i]} wall={_diagWorstWall[i]:F2}ms "
+                    + $"gpu_work={_diagWorstGpu[i]:F2} submit_cpu={_diagWorstSubmitCpu[i]:F2} "
+                    + $"present_cpu={_diagWorstPresentCpu[i]:F2} upstream={_diagWorstUpstream[i]:F2}");
+                _diagWorstWall[i] = 0; _diagWorstGpu[i] = 0;
+                _diagWorstSubmitCpu[i] = 0; _diagWorstPresentCpu[i] = 0;
+                _diagWorstUpstream[i] = 0; _diagWorstFrameNo[i] = 0;
+            }
+            _diagFramesInWindow = 0;
+            _diagJitterCount = 0;
+            _diagLastReportTs = now;
+        }
+    }
+
     public void Dispose()
     {
         _context.DeviceApi.DeviceWaitIdle(_context.DeviceHandle);
@@ -433,6 +655,11 @@ internal class VulkanDisplay : IDisposable
         CommandBufferPool = null!;
         _surface?.Dispose();
         _surface = null!;
+        if (_diagQueryPool.Handle != 0)
+        {
+            _context.DeviceApi.DestroyQueryPool(_context.DeviceHandle, _diagQueryPool, IntPtr.Zero);
+            _diagQueryPool = default;
+        }
     }
 
 }
