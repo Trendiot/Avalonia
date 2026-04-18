@@ -33,7 +33,7 @@ internal class VulkanKhrRenderTarget : IVulkanRenderTarget
     private const int WorstFramesPerWindow = 5;
     internal long DiagPrevDisposeEndTs;
     internal long DiagBeginDrawEnterTs;
-    internal long DiagLockEnterTs;
+    internal long DiagLockAcquiredTs;
     internal long DiagBeginDrawExitTs;
     private long _diagFrameCount;
     private long _diagJitterCount;
@@ -70,10 +70,11 @@ internal class VulkanKhrRenderTarget : IVulkanRenderTarget
 
         double intervalMs = (disposeEndTs - DiagPrevDisposeEndTs) * tickToMs;
         double gapMs    = (DiagBeginDrawEnterTs - DiagPrevDisposeEndTs) * tickToMs;
-        double lockMs   = (DiagBeginDrawExitTs   - DiagLockEnterTs)      * tickToMs;
-        // bdRest = total BeginDraw minus the lock-acquisition portion
-        double bdTotalMs = (DiagBeginDrawExitTs - DiagBeginDrawEnterTs) * tickToMs;
-        double bdRestMs = bdTotalMs - lockMs;
+        // lock = time spent waiting on Device.Lock acquire only
+        double lockMs   = (DiagLockAcquiredTs - DiagBeginDrawEnterTs) * tickToMs;
+        // bdRest = post-lock BeginDraw work (FreeUsedCommandBuffers, EnsureSwapchain,
+        // image transition / recreate)
+        double bdRestMs = (DiagBeginDrawExitTs - DiagLockAcquiredTs) * tickToMs;
         DiagPrevDisposeEndTs = disposeEndTs;
 
         int gcGen = -1;
@@ -172,10 +173,10 @@ internal class VulkanKhrRenderTarget : IVulkanRenderTarget
     {
         DiagBeginDrawEnterTs = Stopwatch.GetTimestamp();
         DiagSnapshotGcAtFrameStart();
-        DiagLockEnterTs = DiagBeginDrawEnterTs;
         var l = _context.EnsureCurrent();
-        // (lock acquired; the time from DiagLockEnterTs -> here is the lock-acquire portion;
-        //  bdRest in the report is the remaining BeginDraw work)
+        // Mark the moment Device.Lock was actually acquired so the report can split
+        // "lock-wait" from "post-lock BeginDraw work".
+        DiagLockAcquiredTs = Stopwatch.GetTimestamp();
         _display.CommandBufferPool.FreeUsedCommandBuffers();
         if (_display.EnsureSwapchainAvailable() || _image == null)
         {

@@ -404,12 +404,20 @@ internal class VulkanDisplay : IDisposable
         // The fence was already submitted with the main command buffer above
         if (_presentFence.HasValue && _context is VulkanContext vulkanContext)
         {
-            // Pass the fence wait action to render timer for VSync synchronization
+            // Pass the fence wait action to render timer for VSync synchronization.
+            //
+            // Do NOT take Device.Lock here. The wait is naturally sequenced before the
+            // next EndPresentation by the timer's tick chain: the timer only ticks AFTER
+            // this wait completes, and the next vkResetFences/vkQueueSubmit on this fence
+            // can only run after that tick is dispatched and the next render lands. So no
+            // concurrent fence operation can race with this wait under the existing
+            // single-window control flow. Holding Device.Lock during a wait that can take
+            // 10-37ms (GPU paced behind by FIFO) blocks the render thread's next
+            // BeginDraw on Device.Lock, which is the dominant per-frame jitter source at
+            // high refresh rates. Each fence is per-VulkanDisplay so multi-window apps
+            // remain safe (distinct fence objects do not require cross-fence sync).
             vulkanContext.SetPresentFence(() => {
-                using (_context.Device.Lock())
-                {
-                    _presentFence.Value.Wait(100_000_000); // 100ms timeout
-                }
+                _presentFence.Value.Wait(100_000_000); // 100ms timeout
             });
         }
     }
