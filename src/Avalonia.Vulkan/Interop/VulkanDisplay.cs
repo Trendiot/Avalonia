@@ -201,6 +201,12 @@ internal class VulkanDisplay : IDisposable
             presentMode = VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR;
         }
 
+        // Print which present mode the WSI actually accepted, and the full set advertised.
+        // Mesa's MESA_VK_WSI_PRESENT_MODE env var works by limiting which modes are
+        // advertised here, so this line is the unequivocal proof of what's in effect.
+        Console.Error.WriteLine(
+            $"[GPU] Present mode SELECTED: {presentMode}; AVAILABLE: [{string.Join(",", modes)}]; imageCount={imageCount}");
+
         var swapchainCreateInfo = new VkSwapchainCreateInfoKHR
         {
             sType = VkStructureType.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
