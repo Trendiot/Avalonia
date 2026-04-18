@@ -27,36 +27,16 @@ internal class VulkanDisplay : IDisposable
     private bool _swapchainOutOfDate;
 
     // --- Frame-pacing diagnostics (jitter investigation) ---
-    // Splits the inter-frame interval into "outside" (gap between presents — scheduler,
-    // composition wait, Skia draw setup) and "render" (StartPresentation entry to
-    // EndPresentation entry — covers the actual Skia draw + record work on the render
-    // thread). Logs only the worst few frames per 1s window so console I/O does not
-    // perturb the measurement.
+    // Logs a single line on outlier frames so steady-state has zero log overhead.
+    // Threshold tuned for 165Hz (~6.06ms refresh); anything > 9ms is a missed vsync.
     private const double JitterThresholdMs = 9.0;
-    private const int WorstFramesPerWindow = 5;
-    private long _diagLastFrameEndTs;          // ticks at end of previous EndPresentation
-    private long _diagStartPresentationTs;     // ticks at entry to current StartPresentation
-    private long _diagEndPresentationEnterTs;  // ticks at entry to current EndPresentation
-    private long _diagAcquireTs;
-    private long _diagBlitTs;
-    private long _diagSubmitPresentTs;
+    private long _diagLastFrameEndTs;          // Stopwatch ticks at end of previous EndPresentation
+    private long _diagAcquireTs;               // duration of last vkAcquireNextImageKHR
+    private long _diagBlitTs;                  // duration of last blit recording
+    private long _diagSubmitPresentTs;         // duration of last submit + vkQueuePresentKHR
     private long _diagFrameCount;
     private long _diagJitterCount;
     private long _diagLastReportTs;
-    // Top-N worst frames in the current window. Parallel arrays kept small (5 entries).
-    private readonly double[] _diagWorstInterval = new double[WorstFramesPerWindow];
-    private readonly double[] _diagWorstOutside = new double[WorstFramesPerWindow];
-    private readonly double[] _diagWorstRender = new double[WorstFramesPerWindow];
-    private readonly double[] _diagWorstSubmit = new double[WorstFramesPerWindow];
-    private readonly long[] _diagWorstFrameNo = new long[WorstFramesPerWindow];
-    // GC observation: which generation, if any, collected during this frame.
-    private readonly int[] _diagWorstGcGen = new int[WorstFramesPerWindow];
-    private int _diagGen0AtFrameStart;
-    private int _diagGen1AtFrameStart;
-    private int _diagGen2AtFrameStart;
-    private int _diagGen0AtWindowStart;
-    private int _diagGen1AtWindowStart;
-    private int _diagGen2AtWindowStart;
     
     private VulkanDisplay(IVulkanPlatformGraphicsContext context, VulkanKhrSurface surface, VkSwapchainKHR swapchain,
         VkExtent2D swapchainExtent, IVulkanKhrSurfacePlatformSurface platformSurface, bool isDynamicMode)
@@ -290,14 +270,8 @@ internal class VulkanDisplay : IDisposable
 
     public VulkanCommandBuffer StartPresentation()
     {
-        _diagStartPresentationTs = Stopwatch.GetTimestamp();
-        // Snapshot GC counts at the start of each frame so EndPresentation can see if a
-        // collection happened during this frame interval.
-        _diagGen0AtFrameStart = GC.CollectionCount(0);
-        _diagGen1AtFrameStart = GC.CollectionCount(1);
-        _diagGen2AtFrameStart = GC.CollectionCount(2);
         _nextImage = 0;
-        var acquireStart = _diagStartPresentationTs;
+        var acquireStart = Stopwatch.GetTimestamp();
         while (true)
         {
             var acquireResult = _context.DeviceApi.AcquireNextImageKHR(
@@ -377,8 +351,7 @@ internal class VulkanDisplay : IDisposable
 
     internal unsafe void EndPresentation(VulkanCommandBuffer commandBuffer)
     {
-        _diagEndPresentationEnterTs = Stopwatch.GetTimestamp();
-        var submitPresentStart = _diagEndPresentationEnterTs;
+        var submitPresentStart = Stopwatch.GetTimestamp();
         VulkanMemoryHelper.TransitionLayout(_context, commandBuffer,
             _swapchainImages[_nextImage],
             VkImageLayout.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -471,82 +444,36 @@ internal class VulkanDisplay : IDisposable
         {
             _diagLastFrameEndTs = now;
             _diagLastReportTs = now;
-            _diagGen0AtWindowStart = GC.CollectionCount(0);
-            _diagGen1AtWindowStart = GC.CollectionCount(1);
-            _diagGen2AtWindowStart = GC.CollectionCount(2);
             return;
         }
 
-        // Detect highest GC generation that collected during this frame.
-        int gcGenThisFrame = -1;
-        if (GC.CollectionCount(2) > _diagGen2AtFrameStart) gcGenThisFrame = 2;
-        else if (GC.CollectionCount(1) > _diagGen1AtFrameStart) gcGenThisFrame = 1;
-        else if (GC.CollectionCount(0) > _diagGen0AtFrameStart) gcGenThisFrame = 0;
-
         double tickToMs = 1000.0 / Stopwatch.Frequency;
         double frameMs = (now - _diagLastFrameEndTs) * tickToMs;
-        // "outside" = time between previous EndPresentation finishing and current StartPresentation
-        // entering. Covers Avalonia render scheduler, composition wait, Skia setup. This is the
-        // bucket that should localize the upstream stall.
-        double outsideMs = (_diagStartPresentationTs - _diagLastFrameEndTs) * tickToMs;
-        // "render" = time spent inside the render pipeline from StartPresentation entry to
-        // EndPresentation entry. Covers acquire + Skia draw + blit recording.
-        double renderMs = (_diagEndPresentationEnterTs - _diagStartPresentationTs) * tickToMs;
-        double submitPresentMs = _diagSubmitPresentTs * tickToMs;
         _diagLastFrameEndTs = now;
 
         if (frameMs > JitterThresholdMs)
         {
             _diagJitterCount++;
-            // Track only the worst N frames per window — minimal overhead, no per-frame I/O.
-            int worstIdx = 0;
-            for (int i = 1; i < WorstFramesPerWindow; i++)
-                if (_diagWorstInterval[i] < _diagWorstInterval[worstIdx]) worstIdx = i;
-            if (frameMs > _diagWorstInterval[worstIdx])
-            {
-                _diagWorstInterval[worstIdx] = frameMs;
-                _diagWorstOutside[worstIdx] = outsideMs;
-                _diagWorstRender[worstIdx] = renderMs;
-                _diagWorstSubmit[worstIdx] = submitPresentMs;
-                _diagWorstFrameNo[worstIdx] = _diagFrameCount;
-                _diagWorstGcGen[worstIdx] = gcGenThisFrame;
-            }
+            double acquireMs = _diagAcquireTs * tickToMs;
+            double blitMs = _diagBlitTs * tickToMs;
+            double submitPresentMs = _diagSubmitPresentTs * tickToMs;
+            double otherMs = frameMs - acquireMs - blitMs - submitPresentMs;
+            Console.Error.WriteLine(
+                $"[VulkanDisplay] JITTER frame#{_diagFrameCount} interval={frameMs:F2}ms "
+                + $"acquire={acquireMs:F2}ms blit={blitMs:F2}ms submit+present={submitPresentMs:F2}ms "
+                + $"other={otherMs:F2}ms swapchainOutOfDate={_swapchainOutOfDate}");
         }
 
+        // Per-second summary so we can see the cadence at a glance
         double sinceReportMs = (now - _diagLastReportTs) * tickToMs;
         if (sinceReportMs >= 1000.0)
         {
-            int gen0Now = GC.CollectionCount(0);
-            int gen1Now = GC.CollectionCount(1);
-            int gen2Now = GC.CollectionCount(2);
-            int g0 = gen0Now - _diagGen0AtWindowStart;
-            int g1 = gen1Now - _diagGen1AtWindowStart;
-            int g2 = gen2Now - _diagGen2AtWindowStart;
             Console.Error.WriteLine(
-                $"[VulkanDisplay] 1s: frames={_diagFrameCount} jitter={_diagJitterCount} "
-                + $"avgFps={(_diagFrameCount * 1000.0 / sinceReportMs):F1} "
-                + $"gc=[g0:{g0} g1:{g1} g2:{g2}]");
-            for (int i = 0; i < WorstFramesPerWindow; i++)
-            {
-                if (_diagWorstInterval[i] <= 0) continue;
-                string gcTag = _diagWorstGcGen[i] >= 0 ? $" GC-Gen{_diagWorstGcGen[i]}" : "";
-                Console.Error.WriteLine(
-                    $"  worst#{i} frame={_diagWorstFrameNo[i]} interval={_diagWorstInterval[i]:F2}ms "
-                    + $"outside={_diagWorstOutside[i]:F2}ms render={_diagWorstRender[i]:F2}ms "
-                    + $"submit+present={_diagWorstSubmit[i]:F2}ms{gcTag}");
-                _diagWorstInterval[i] = 0;
-                _diagWorstOutside[i] = 0;
-                _diagWorstRender[i] = 0;
-                _diagWorstSubmit[i] = 0;
-                _diagWorstFrameNo[i] = 0;
-                _diagWorstGcGen[i] = -1;
-            }
+                $"[VulkanDisplay] 1s window: frames={_diagFrameCount} jitterEvents={_diagJitterCount} "
+                + $"avgFps={(_diagFrameCount * 1000.0 / sinceReportMs):F1}");
             _diagFrameCount = 0;
             _diagJitterCount = 0;
             _diagLastReportTs = now;
-            _diagGen0AtWindowStart = gen0Now;
-            _diagGen1AtWindowStart = gen1Now;
-            _diagGen2AtWindowStart = gen2Now;
         }
     }
     
