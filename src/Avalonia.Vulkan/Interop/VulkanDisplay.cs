@@ -364,8 +364,16 @@ internal class VulkanDisplay : IDisposable
         return false;
     }
 
+    // Per-StartPresentation timings exposed to RenderingSession for the [VKD] diagnostic.
+    internal double DiagAcquireMs;
+    internal double DiagCreateCommandBufferMs;
+    internal double DiagSpRestMs;   // time after CCB through end of StartPresentation
+
     public VulkanCommandBuffer StartPresentation()
     {
+        double tickToMs = 1000.0 / Stopwatch.Frequency;
+        long t0 = Stopwatch.GetTimestamp();
+
         _nextImage = 0;
         while (true)
         {
@@ -386,12 +394,23 @@ internal class VulkanDisplay : IDisposable
             }
         }
 
+        long t1 = Stopwatch.GetTimestamp();
+        DiagAcquireMs = (t1 - t0) * tickToMs;
+
         var commandBuffer = CommandBufferPool.CreateCommandBuffer();
+
+        long t2 = Stopwatch.GetTimestamp();
+        DiagCreateCommandBufferMs = (t2 - t1) * tickToMs;
+
         commandBuffer.BeginRecording();
         VulkanMemoryHelper.TransitionLayout(_context, commandBuffer,
             _swapchainImages[_nextImage], VkImageLayout.VK_IMAGE_LAYOUT_UNDEFINED,
             VkAccessFlags.VK_ACCESS_NONE, VkImageLayout.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VkAccessFlags.VK_ACCESS_TRANSFER_WRITE_BIT, 1);
+
+        long t3 = Stopwatch.GetTimestamp();
+        DiagSpRestMs = (t3 - t2) * tickToMs;
+
         return commandBuffer;
     }
 
