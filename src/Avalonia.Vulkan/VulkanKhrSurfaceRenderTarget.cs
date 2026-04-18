@@ -177,7 +177,15 @@ internal class VulkanKhrRenderTarget : IVulkanRenderTarget
         // Mark the moment Device.Lock was actually acquired so the report can split
         // "lock-wait" from "post-lock BeginDraw work".
         DiagLockAcquiredTs = Stopwatch.GetTimestamp();
-        _display.CommandBufferPool.FreeUsedCommandBuffers();
+        // Use the non-blocking variant. FreeUsedCommandBuffers calls Dispose on every
+        // queued command buffer, and Dispose calls _fence.Wait() with no timeout. The
+        // per-frame layout-transition submit (VulkanImage.TransitionLayout, called below)
+        // submits with the command buffer's own fence, which is only signaled when the
+        // GPU has finished the transition. Under FIFO_KHR the GPU is paced by vsync, so
+        // that wait can take a full vsync cycle (or more under burst). FreeFinished only
+        // disposes command buffers whose fences are already signaled (vkGetFenceStatus),
+        // so it never blocks; pending CBs simply stay queued until the next BeginDraw.
+        _display.CommandBufferPool.FreeFinishedCommandBuffers();
         if (_display.EnsureSwapchainAvailable() || _image == null)
         {
             DestroyImage();
