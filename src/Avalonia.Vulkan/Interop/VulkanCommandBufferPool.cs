@@ -57,7 +57,23 @@ internal class VulkanCommandBufferPool : IDisposable
     {
         if (_autoFree)
             FreeFinishedCommandBuffers();
-        
+
+        // Recycle a finished command buffer if one is available. Allocating a fresh
+        // command buffer + fence per frame (vkAllocateCommandBuffers + vkCreateFence)
+        // periodically stalls 10-22ms on Mesa as the driver maintains its internal
+        // freelists. Reusing avoids both calls in steady state. The pool was created
+        // with VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT so per-CB reset is legal.
+        if (_commandBuffers.Count > 0)
+        {
+            var head = _commandBuffers.Peek();
+            if (head.IsFinished)
+            {
+                _commandBuffers.Dequeue();
+                head.Reset();
+                return head;
+            }
+        }
+
         var commandBufferAllocateInfo = new VkCommandBufferAllocateInfo
         {
             sType = VkStructureType.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,

@@ -46,6 +46,9 @@ internal unsafe partial class VulkanDeviceApi
     public partial void FreeCommandBuffers(VkDevice device, VkCommandPool commandPool, uint32_t commandBufferCount,
         VkCommandBuffer* pCommandBuffers);
 
+    [GetProcAddress("vkResetCommandBuffer")]
+    public partial VkResult ResetCommandBuffer(VkCommandBuffer commandBuffer, uint32_t flags);
+
     [GetProcAddress("vkWaitForFences")]
     public partial VkResult WaitForFences(VkDevice device, uint32_t fenceCount, VkFence* pFences, VkBool32 waitAll,
         uint64_t timeout);

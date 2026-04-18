@@ -36,6 +36,19 @@ internal class VulkanCommandBuffer : IDisposable
 
     public bool IsFinished => _fence.IsSignaled;
 
+    /// <summary>
+    /// Resets the command buffer for reuse. The command pool must have been created with
+    /// VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT (it is, in VulkanCommandBufferPool).
+    /// The fence is left as-is — it's already signaled (the GPU finished prior work) and
+    /// will be reset by the next Submit() call before reuse.
+    /// </summary>
+    public void Reset()
+    {
+        _context.DeviceApi.ResetCommandBuffer(_handle, 0).ThrowOnError("vkResetCommandBuffer");
+        _hasStarted = false;
+        _hasEnded = false;
+    }
+
     public void BeginRecording()
     {
         if (_hasStarted)
