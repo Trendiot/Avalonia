@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using Avalonia.Logging;
 using Avalonia.Metadata;
@@ -39,6 +40,30 @@ namespace Avalonia.Rendering
         private volatile bool _hasItems;
         private bool _running;
         private bool _wakeupPending;
+
+        // --- Tick-loop diagnostic ----------------------------------------------------------
+        // Splits the time around each tick into:
+        //   gap        : time from previous TimerTick exit -> this TimerTick entry
+        //                (timer-side latency: VulkanRenderTimer wait + dispatch)
+        //   pre        : TimerTick entry -> first task.Render() call (lock + items copy)
+        //   render     : sum of all task.Render() durations on this tick
+        //                (compositor + scene graph + Skia + native render target)
+        //   post       : last task.Render() return -> TimerTick exit (cleanup + epilogue)
+        //
+        // Logs only the worst N ticks per 1s window so console I/O cannot perturb timings.
+        private const double DiagJitterThresholdMs = 9.0;
+        private const int    DiagWorstPerWindow    = 5;
+        private long _diagPrevTickExitTs;
+        private long _diagLastReportTs;
+        private long _diagTickCount;
+        private long _diagJitterCount;
+        private readonly double[] _diagWorstInterval = new double[DiagWorstPerWindow];
+        private readonly double[] _diagWorstGap     = new double[DiagWorstPerWindow];
+        private readonly double[] _diagWorstPre     = new double[DiagWorstPerWindow];
+        private readonly double[] _diagWorstRender  = new double[DiagWorstPerWindow];
+        private readonly double[] _diagWorstPost    = new double[DiagWorstPerWindow];
+        private readonly int   [] _diagWorstTaskCt  = new int   [DiagWorstPerWindow];
+        private readonly long  [] _diagWorstTickNo  = new long  [DiagWorstPerWindow];
         
         /// <summary>
         /// Initializes a new instance of the <see cref="DefaultRenderLoop"/> class.
@@ -122,6 +147,10 @@ namespace Avalonia.Rendering
         {
             if (Interlocked.CompareExchange(ref _inTick, 1, 0) == 0)
             {
+                long diagTickEnterTs = Stopwatch.GetTimestamp();
+                long diagFirstRenderEnterTs = 0;
+                long diagLastRenderExitTs = 0;
+                int  diagTaskCount = 0;
                 try
                 {
                     // Consume any pending wakeup — this tick will process its work.
@@ -141,11 +170,14 @@ namespace Avalonia.Rendering
                     }
 
                     var wantsNextTick = false;
+                    diagTaskCount = _itemsCopy.Count;
+                    diagFirstRenderEnterTs = Stopwatch.GetTimestamp();
                     for (int i = 0; i < _itemsCopy.Count; i++)
                     {
                         wantsNextTick |= _itemsCopy[i].Render();
                     }
-                    
+                    diagLastRenderExitTs = Stopwatch.GetTimestamp();
+
                     _itemsCopy.Clear();
 
                     if (!wantsNextTick)
@@ -174,8 +206,76 @@ namespace Avalonia.Rendering
                 }
                 finally
                 {
+                    long diagTickExitTs = Stopwatch.GetTimestamp();
+                    DiagReportTick(diagTickEnterTs, diagFirstRenderEnterTs, diagLastRenderExitTs,
+                        diagTickExitTs, diagTaskCount);
                     Interlocked.Exchange(ref _inTick, 0);
                 }
+            }
+        }
+
+        private void DiagReportTick(long tickEnterTs, long firstRenderEnterTs,
+            long lastRenderExitTs, long tickExitTs, int taskCount)
+        {
+            double tickToMs = 1000.0 / Stopwatch.Frequency;
+            _diagTickCount++;
+
+            if (_diagPrevTickExitTs == 0)
+            {
+                _diagPrevTickExitTs = tickExitTs;
+                _diagLastReportTs = tickExitTs;
+                return;
+            }
+
+            double intervalMs = (tickExitTs - _diagPrevTickExitTs) * tickToMs;
+            double gapMs      = (tickEnterTs - _diagPrevTickExitTs) * tickToMs;
+            // pre = tick entry up to first task.Render() call (lock acquisitions, items copy).
+            // render = the actual task work. post = cleanup. If no tasks ran (early return path),
+            // pre/render/post stay 0 and the entire interval is just gap + tick overhead.
+            double preMs    = firstRenderEnterTs > 0 ? (firstRenderEnterTs - tickEnterTs) * tickToMs : 0;
+            double renderMs = (firstRenderEnterTs > 0 && lastRenderExitTs > 0)
+                ? (lastRenderExitTs - firstRenderEnterTs) * tickToMs
+                : 0;
+            double postMs   = lastRenderExitTs > 0 ? (tickExitTs - lastRenderExitTs) * tickToMs : 0;
+            _diagPrevTickExitTs = tickExitTs;
+
+            if (intervalMs > DiagJitterThresholdMs)
+            {
+                _diagJitterCount++;
+                int worstIdx = 0;
+                for (int i = 1; i < DiagWorstPerWindow; i++)
+                    if (_diagWorstInterval[i] < _diagWorstInterval[worstIdx]) worstIdx = i;
+                if (intervalMs > _diagWorstInterval[worstIdx])
+                {
+                    _diagWorstInterval[worstIdx] = intervalMs;
+                    _diagWorstGap     [worstIdx] = gapMs;
+                    _diagWorstPre     [worstIdx] = preMs;
+                    _diagWorstRender  [worstIdx] = renderMs;
+                    _diagWorstPost    [worstIdx] = postMs;
+                    _diagWorstTaskCt  [worstIdx] = taskCount;
+                    _diagWorstTickNo  [worstIdx] = _diagTickCount;
+                }
+            }
+
+            double sinceReportMs = (tickExitTs - _diagLastReportTs) * tickToMs;
+            if (sinceReportMs >= 1000.0)
+            {
+                Console.Error.WriteLine(
+                    $"[RL] 1s: ticks={_diagTickCount} jitter={_diagJitterCount} "
+                    + $"avgFps={(_diagTickCount * 1000.0 / sinceReportMs):F1}");
+                for (int i = 0; i < DiagWorstPerWindow; i++)
+                {
+                    if (_diagWorstInterval[i] <= 0) continue;
+                    Console.Error.WriteLine(
+                        $"  worst#{i} t={_diagWorstTickNo[i]} int={_diagWorstInterval[i]:F2}ms "
+                        + $"gap={_diagWorstGap[i]:F2} pre={_diagWorstPre[i]:F2} "
+                        + $"render={_diagWorstRender[i]:F2} post={_diagWorstPost[i]:F2} "
+                        + $"tasks={_diagWorstTaskCt[i]}");
+                    _diagWorstInterval[i] = 0; _diagWorstGap[i] = 0; _diagWorstPre[i] = 0;
+                    _diagWorstRender[i] = 0; _diagWorstPost[i] = 0;
+                    _diagWorstTaskCt[i] = 0; _diagWorstTickNo[i] = 0;
+                }
+                _diagTickCount = 0; _diagJitterCount = 0; _diagLastReportTs = tickExitTs;
             }
         }
     }
