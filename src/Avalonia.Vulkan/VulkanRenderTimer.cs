@@ -101,7 +101,11 @@ public class VulkanRenderTimer : IRenderTimer
             }
             else
             {
-                Thread.Sleep(8);
+                // Block until SetPresentFenceWaitAction signals a new fence, with a safety
+                // timeout so an idle UI (no renders being produced) still probes periodically.
+                // Using a fixed Sleep here would drift relative to vsync and cause periodic
+                // single-frame skips at high refresh rates.
+                _wakeEvent.WaitOne(16);
             }
 
             _tick?.Invoke(sw.Elapsed);
@@ -116,6 +120,9 @@ public class VulkanRenderTimer : IRenderTimer
     {
         lock (_syncLock)
             _waitForPresentFence = fenceWaitAction;
+        // Wake the render loop immediately so it picks up the new fence without
+        // waiting on the safety timeout in the no-fence branch.
+        _wakeEvent.Set();
         Logger.TryGet(LogEventLevel.Verbose, "VulkanDynamic")
             ?.Log(this, "Present fence wait action set for VSync synchronization");
     }
