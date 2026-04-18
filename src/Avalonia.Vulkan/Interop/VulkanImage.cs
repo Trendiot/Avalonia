@@ -148,6 +148,18 @@ internal class VulkanImageBase : IDisposable
 
     internal void TransitionLayout(VkImageLayout destinationLayout, VkAccessFlags destinationAccessFlags)
     {
+        // Skip the no-op case: if the image is already in the requested layout with the
+        // same access flags, recording and submitting a barrier accomplishes nothing but
+        // still costs a fresh command buffer + fence + vkQueueSubmit. Under FIFO_KHR
+        // pacing those CBs accumulate behind the present queue, growing the pool's
+        // pending list and producing periodic stalls when FreeFinishedCommandBuffers
+        // catches up with a burst of disposals. Hot path: BlitImageToCurrentImage already
+        // restores the image to CurrentLayout at the end of every frame, so the
+        // per-frame TransitionLayout(COLOR_ATTACHMENT_OPTIMAL, NONE) called from
+        // BeginDraw is always a no-op in steady state.
+        if (CurrentLayout == destinationLayout && _currentAccessFlags == destinationAccessFlags)
+            return;
+
         var commandBuffer = _commandBufferPool!.CreateCommandBuffer();
         commandBuffer.BeginRecording();
         VulkanMemoryHelper.TransitionLayout(_context, commandBuffer, Handle,
