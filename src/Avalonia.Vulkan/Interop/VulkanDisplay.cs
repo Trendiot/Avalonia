@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using Avalonia.Vulkan.UnmanagedInterop;
@@ -25,18 +24,6 @@ internal class VulkanDisplay : IDisposable
     public PixelSize Size { get; private set; }
     private VulkanFence? _presentFence;
     private bool _swapchainOutOfDate;
-
-    // --- Frame-pacing diagnostics (jitter investigation) ---
-    // Logs a single line on outlier frames so steady-state has zero log overhead.
-    // Threshold tuned for 165Hz (~6.06ms refresh); anything > 9ms is a missed vsync.
-    private const double JitterThresholdMs = 9.0;
-    private long _diagLastFrameEndTs;          // Stopwatch ticks at end of previous EndPresentation
-    private long _diagAcquireTs;               // duration of last vkAcquireNextImageKHR
-    private long _diagBlitTs;                  // duration of last blit recording
-    private long _diagSubmitPresentTs;         // duration of last submit + vkQueuePresentKHR
-    private long _diagFrameCount;
-    private long _diagJitterCount;
-    private long _diagLastReportTs;
     
     private VulkanDisplay(IVulkanPlatformGraphicsContext context, VulkanKhrSurface surface, VkSwapchainKHR swapchain,
         VkExtent2D swapchainExtent, IVulkanKhrSurfacePlatformSurface platformSurface, bool isDynamicMode)
@@ -271,7 +258,6 @@ internal class VulkanDisplay : IDisposable
     public VulkanCommandBuffer StartPresentation()
     {
         _nextImage = 0;
-        var acquireStart = Stopwatch.GetTimestamp();
         while (true)
         {
             var acquireResult = _context.DeviceApi.AcquireNextImageKHR(
@@ -290,7 +276,6 @@ internal class VulkanDisplay : IDisposable
                 break;
             }
         }
-        _diagAcquireTs = Stopwatch.GetTimestamp() - acquireStart;
 
         var commandBuffer = CommandBufferPool.CreateCommandBuffer();
         commandBuffer.BeginRecording();
@@ -303,7 +288,6 @@ internal class VulkanDisplay : IDisposable
 
     internal unsafe void BlitImageToCurrentImage(VulkanCommandBuffer commandBuffer, VulkanImage image)
     {
-        var blitStart = Stopwatch.GetTimestamp();
         VulkanMemoryHelper.TransitionLayout(_context, commandBuffer,
             image.Handle, image.CurrentLayout, VkAccessFlags.VK_ACCESS_NONE,
             VkImageLayout.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -346,12 +330,10 @@ internal class VulkanDisplay : IDisposable
             image.Handle, VkImageLayout.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VkAccessFlags.VK_ACCESS_TRANSFER_READ_BIT,
             image.CurrentLayout, VkAccessFlags.VK_ACCESS_NONE, image.MipLevels);
-        _diagBlitTs = Stopwatch.GetTimestamp() - blitStart;
     }
 
     internal unsafe void EndPresentation(VulkanCommandBuffer commandBuffer)
     {
-        var submitPresentStart = Stopwatch.GetTimestamp();
         VulkanMemoryHelper.TransitionLayout(_context, commandBuffer,
             _swapchainImages[_nextImage],
             VkImageLayout.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -429,51 +411,6 @@ internal class VulkanDisplay : IDisposable
                     _presentFence.Value.Wait(100_000_000); // 100ms timeout
                 }
             });
-        }
-
-        _diagSubmitPresentTs = Stopwatch.GetTimestamp() - submitPresentStart;
-        ReportFrameDiagnostics();
-    }
-
-    private void ReportFrameDiagnostics()
-    {
-        var now = Stopwatch.GetTimestamp();
-        _diagFrameCount++;
-
-        if (_diagLastFrameEndTs == 0)
-        {
-            _diagLastFrameEndTs = now;
-            _diagLastReportTs = now;
-            return;
-        }
-
-        double tickToMs = 1000.0 / Stopwatch.Frequency;
-        double frameMs = (now - _diagLastFrameEndTs) * tickToMs;
-        _diagLastFrameEndTs = now;
-
-        if (frameMs > JitterThresholdMs)
-        {
-            _diagJitterCount++;
-            double acquireMs = _diagAcquireTs * tickToMs;
-            double blitMs = _diagBlitTs * tickToMs;
-            double submitPresentMs = _diagSubmitPresentTs * tickToMs;
-            double otherMs = frameMs - acquireMs - blitMs - submitPresentMs;
-            Console.Error.WriteLine(
-                $"[VulkanDisplay] JITTER frame#{_diagFrameCount} interval={frameMs:F2}ms "
-                + $"acquire={acquireMs:F2}ms blit={blitMs:F2}ms submit+present={submitPresentMs:F2}ms "
-                + $"other={otherMs:F2}ms swapchainOutOfDate={_swapchainOutOfDate}");
-        }
-
-        // Per-second summary so we can see the cadence at a glance
-        double sinceReportMs = (now - _diagLastReportTs) * tickToMs;
-        if (sinceReportMs >= 1000.0)
-        {
-            Console.Error.WriteLine(
-                $"[VulkanDisplay] 1s window: frames={_diagFrameCount} jitterEvents={_diagJitterCount} "
-                + $"avgFps={(_diagFrameCount * 1000.0 / sinceReportMs):F1}");
-            _diagFrameCount = 0;
-            _diagJitterCount = 0;
-            _diagLastReportTs = now;
         }
     }
     
