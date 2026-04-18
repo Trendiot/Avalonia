@@ -47,11 +47,20 @@ internal class VulkanKhrRenderTarget : IVulkanRenderTarget
     private readonly double[] _diagWorstInterval = new double[WorstFramesPerWindow];
     private readonly double[] _diagWorstGap     = new double[WorstFramesPerWindow];
     private readonly double[] _diagWorstLock    = new double[WorstFramesPerWindow];
-    private readonly double[] _diagWorstBdRest  = new double[WorstFramesPerWindow];
+    private readonly double[] _diagWorstBdFree  = new double[WorstFramesPerWindow];
+    private readonly double[] _diagWorstBdEns   = new double[WorstFramesPerWindow];
+    private readonly double[] _diagWorstBdRecOrTr = new double[WorstFramesPerWindow];
+    private readonly bool  [] _diagWorstRecreate  = new bool  [WorstFramesPerWindow];
     private readonly double[] _diagWorstSkia    = new double[WorstFramesPerWindow];
     private readonly double[] _diagWorstPresent = new double[WorstFramesPerWindow];
     private readonly long  [] _diagWorstFrameNo = new long  [WorstFramesPerWindow];
     private readonly int   [] _diagWorstGcGen   = new int   [WorstFramesPerWindow];
+
+    // Per-frame sub-phase timings for bdRest, set by BeginDraw and consumed by DiagReportFrame.
+    internal double DiagBdFreeMs;
+    internal double DiagBdEnsureMs;
+    internal double DiagBdRecreateOrTransitionMs;
+    internal bool   DiagBdRecreated;
 
     internal void DiagReportFrame(long disposeEndTs, double presentMs, double skiaMs)
     {
@@ -72,9 +81,6 @@ internal class VulkanKhrRenderTarget : IVulkanRenderTarget
         double gapMs    = (DiagBeginDrawEnterTs - DiagPrevDisposeEndTs) * tickToMs;
         // lock = time spent waiting on Device.Lock acquire only
         double lockMs   = (DiagLockAcquiredTs - DiagBeginDrawEnterTs) * tickToMs;
-        // bdRest = post-lock BeginDraw work (FreeUsedCommandBuffers, EnsureSwapchain,
-        // image transition / recreate)
-        double bdRestMs = (DiagBeginDrawExitTs - DiagLockAcquiredTs) * tickToMs;
         DiagPrevDisposeEndTs = disposeEndTs;
 
         int gcGen = -1;
@@ -90,14 +96,17 @@ internal class VulkanKhrRenderTarget : IVulkanRenderTarget
                 if (_diagWorstInterval[i] < _diagWorstInterval[worstIdx]) worstIdx = i;
             if (intervalMs > _diagWorstInterval[worstIdx])
             {
-                _diagWorstInterval[worstIdx] = intervalMs;
-                _diagWorstGap    [worstIdx] = gapMs;
-                _diagWorstLock   [worstIdx] = lockMs;
-                _diagWorstBdRest [worstIdx] = bdRestMs;
-                _diagWorstSkia   [worstIdx] = skiaMs;
-                _diagWorstPresent[worstIdx] = presentMs;
-                _diagWorstFrameNo[worstIdx] = _diagFrameCount;
-                _diagWorstGcGen  [worstIdx] = gcGen;
+                _diagWorstInterval [worstIdx] = intervalMs;
+                _diagWorstGap      [worstIdx] = gapMs;
+                _diagWorstLock     [worstIdx] = lockMs;
+                _diagWorstBdFree   [worstIdx] = DiagBdFreeMs;
+                _diagWorstBdEns    [worstIdx] = DiagBdEnsureMs;
+                _diagWorstBdRecOrTr[worstIdx] = DiagBdRecreateOrTransitionMs;
+                _diagWorstRecreate [worstIdx] = DiagBdRecreated;
+                _diagWorstSkia     [worstIdx] = skiaMs;
+                _diagWorstPresent  [worstIdx] = presentMs;
+                _diagWorstFrameNo  [worstIdx] = _diagFrameCount;
+                _diagWorstGcGen    [worstIdx] = gcGen;
             }
         }
 
@@ -113,13 +122,17 @@ internal class VulkanKhrRenderTarget : IVulkanRenderTarget
             {
                 if (_diagWorstInterval[i] <= 0) continue;
                 string gcTag = _diagWorstGcGen[i] >= 0 ? $" GC-Gen{_diagWorstGcGen[i]}" : "";
+                string recTag = _diagWorstRecreate[i] ? " RECREATE" : "";
                 Console.Error.WriteLine(
-                    $"  worst#{i} f={_diagWorstFrameNo[i]} interval={_diagWorstInterval[i]:F2}ms "
+                    $"  worst#{i} f={_diagWorstFrameNo[i]} int={_diagWorstInterval[i]:F2}ms "
                     + $"gap={_diagWorstGap[i]:F2} lock={_diagWorstLock[i]:F2} "
-                    + $"bdRest={_diagWorstBdRest[i]:F2} skia={_diagWorstSkia[i]:F2} "
-                    + $"present={_diagWorstPresent[i]:F2}{gcTag}");
+                    + $"bdFree={_diagWorstBdFree[i]:F2} bdEns={_diagWorstBdEns[i]:F2} "
+                    + $"bdRecTr={_diagWorstBdRecOrTr[i]:F2} skia={_diagWorstSkia[i]:F2} "
+                    + $"present={_diagWorstPresent[i]:F2}{recTag}{gcTag}");
                 _diagWorstInterval[i] = 0; _diagWorstGap[i] = 0; _diagWorstLock[i] = 0;
-                _diagWorstBdRest[i] = 0; _diagWorstSkia[i] = 0; _diagWorstPresent[i] = 0;
+                _diagWorstBdFree[i] = 0; _diagWorstBdEns[i] = 0;
+                _diagWorstBdRecOrTr[i] = 0; _diagWorstRecreate[i] = false;
+                _diagWorstSkia[i] = 0; _diagWorstPresent[i] = 0;
                 _diagWorstFrameNo[i] = 0; _diagWorstGcGen[i] = -1;
             }
             _diagFrameCount = 0; _diagJitterCount = 0; _diagLastReportTs = disposeEndTs;
@@ -177,25 +190,34 @@ internal class VulkanKhrRenderTarget : IVulkanRenderTarget
         // Mark the moment Device.Lock was actually acquired so the report can split
         // "lock-wait" from "post-lock BeginDraw work".
         DiagLockAcquiredTs = Stopwatch.GetTimestamp();
-        // Use the non-blocking variant. FreeUsedCommandBuffers calls Dispose on every
-        // queued command buffer, and Dispose calls _fence.Wait() with no timeout. The
-        // per-frame layout-transition submit (VulkanImage.TransitionLayout, called below)
-        // submits with the command buffer's own fence, which is only signaled when the
-        // GPU has finished the transition. Under FIFO_KHR the GPU is paced by vsync, so
-        // that wait can take a full vsync cycle (or more under burst). FreeFinished only
-        // disposes command buffers whose fences are already signaled (vkGetFenceStatus),
-        // so it never blocks; pending CBs simply stay queued until the next BeginDraw.
+        double tickToMs = 1000.0 / Stopwatch.Frequency;
+
+        // (a) FreeFinishedCommandBuffers — should be O(queue) of vkGetFenceStatus checks
+        long t0 = Stopwatch.GetTimestamp();
         _display.CommandBufferPool.FreeFinishedCommandBuffers();
-        if (_display.EnsureSwapchainAvailable() || _image == null)
+        long t1 = Stopwatch.GetTimestamp();
+        DiagBdFreeMs = (t1 - t0) * tickToMs;
+
+        // (b) EnsureSwapchainAvailable — size check; on swapchainOutOfDate or surface
+        //     size change, RecreateSwapchain (which calls DeviceWaitIdle) runs.
+        bool needRecreate = _display.EnsureSwapchainAvailable() || _image == null;
+        long t2 = Stopwatch.GetTimestamp();
+        DiagBdEnsureMs = (t2 - t1) * tickToMs;
+
+        // (c)/(d) Recreate path or per-frame transition. Track which path and time it.
+        DiagBdRecreated = needRecreate;
+        if (needRecreate)
         {
-            DestroyImage();
-            CreateImage();
+            DestroyImage();   // calls DeviceWaitIdle
+            CreateImage();    // allocates + initial transition (creates a CB)
         }
         else
+        {
             _image.TransitionLayout(VkImageLayout.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 VkAccessFlags.VK_ACCESS_NONE);
-
+        }
         DiagBeginDrawExitTs = Stopwatch.GetTimestamp();
+        DiagBdRecreateOrTransitionMs = (DiagBeginDrawExitTs - t2) * tickToMs;
         return new RenderingSession(this, _display, _image!, IsRgba, _platformSurface.Scaling, l,
             DiagBeginDrawExitTs);
     }
