@@ -54,15 +54,23 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
         private IVulkanExternalImage? _inner;
         private readonly PlatformGraphicsExternalImageProperties _properties;
 
-        // [SCACHE2] Per-image cached Skia render target + surface. Hypothesis: Skia's
-        // internal Vulkan backend (descriptor pools, image-view caches, framebuffer cache)
-        // does extra work each time a fresh GRBackendRenderTarget+SKSurface is created
-        // for the same VkImage handle. At 165Hz that's 165 throwaways/sec — Skia's
-        // internal pools never settle. Caching by VkImage handle reuses the same
-        // GRBackendRenderTarget+SKSurface across snapshots; Skia's cached state stays hot.
-        // Invalidate when the underlying VkImage handle changes (image was reimported).
+        // [SCACHE3] Per-image cached Skia render target ONLY. Earlier [SCACHE2] cached
+        // both GRBackendRenderTarget AND SKSurface — that eliminated the post-resize
+        // jitter (proving the per-snapshot Skia object churn was the cause) but caused
+        // visible flicker. Skia's SKSurface.Snapshot() tracks "is the surface dirty since
+        // last snapshot" via internal generation IDs that are only bumped by drawing
+        // through the SKSurface's own canvas. Since PhotonPlot writes to the underlying
+        // VkImage externally, Skia's tracking never sees the surface as dirty, so
+        // makeImageSnapshot() returns the cached SKImage from the FIRST snapshot
+        // indefinitely — that's the stale/blank flicker.
+        //
+        // The fix: cache only the GRBackendRenderTarget (which holds the heavyweight
+        // VkImage-handle-keyed Skia internals: image views, descriptor sets,
+        // framebuffer caches). Recreate the SKSurface fresh per snapshot — it's a
+        // lightweight wrapper, and a fresh SKSurface starts with clean snapshot
+        // tracking, so makeImageSnapshot() always returns a current image.
+        // Invalidate the render target when the underlying VkImage handle changes.
         private GRBackendRenderTarget? _cachedRenderTarget;
-        private SKSurface? _cachedSurface;
         private ulong _cachedImageHandle;
 
         public Image(VulkanSkiaGpu gpu, IVulkanExternalImage inner, PlatformGraphicsExternalImageProperties properties)
@@ -74,8 +82,6 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
 
         public void Dispose()
         {
-            _cachedSurface?.Dispose();
-            _cachedSurface = null;
             _cachedRenderTarget?.Dispose();
             _cachedRenderTarget = null;
             _inner?.Dispose();
@@ -103,14 +109,8 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
             long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
 
             ulong handle = (ulong)info.Handle;
-            SKSurface surface;
-            if (_cachedSurface != null && _cachedImageHandle == handle)
+            if (_cachedRenderTarget == null || _cachedImageHandle != handle)
             {
-                surface = _cachedSurface;
-            }
-            else
-            {
-                _cachedSurface?.Dispose();
                 _cachedRenderTarget?.Dispose();
                 var imageInfo = new GRVkImageInfo
                 {
@@ -130,14 +130,13 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
                     }
                 };
                 _cachedRenderTarget = new GRBackendRenderTarget(_properties.Width, _properties.Height, imageInfo);
-                _cachedSurface = SKSurface.Create(_gpu.GrContext, _cachedRenderTarget,
-                    _properties.TopLeftOrigin ? GRSurfaceOrigin.TopLeft : GRSurfaceOrigin.BottomLeft,
-                    _properties.Format == PlatformGraphicsExternalImageFormat.R8G8B8A8UNorm
-                        ? SKColorType.Rgba8888
-                        : SKColorType.Bgra8888, SKColorSpace.CreateSrgb());
                 _cachedImageHandle = handle;
-                surface = _cachedSurface;
             }
+            using var surface = SKSurface.Create(_gpu.GrContext, _cachedRenderTarget,
+                _properties.TopLeftOrigin ? GRSurfaceOrigin.TopLeft : GRSurfaceOrigin.BottomLeft,
+                _properties.Format == PlatformGraphicsExternalImageFormat.R8G8B8A8UNorm
+                    ? SKColorType.Rgba8888
+                    : SKColorType.Bgra8888, SKColorSpace.CreateSrgb());
             long t3 = System.Diagnostics.Stopwatch.GetTimestamp();
 
             var image = surface.Snapshot();
