@@ -54,6 +54,17 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
         private IVulkanExternalImage? _inner;
         private readonly PlatformGraphicsExternalImageProperties _properties;
 
+        // [SCACHE2] Per-image cached Skia render target + surface. Hypothesis: Skia's
+        // internal Vulkan backend (descriptor pools, image-view caches, framebuffer cache)
+        // does extra work each time a fresh GRBackendRenderTarget+SKSurface is created
+        // for the same VkImage handle. At 165Hz that's 165 throwaways/sec — Skia's
+        // internal pools never settle. Caching by VkImage handle reuses the same
+        // GRBackendRenderTarget+SKSurface across snapshots; Skia's cached state stays hot.
+        // Invalidate when the underlying VkImage handle changes (image was reimported).
+        private GRBackendRenderTarget? _cachedRenderTarget;
+        private SKSurface? _cachedSurface;
+        private ulong _cachedImageHandle;
+
         public Image(VulkanSkiaGpu gpu, IVulkanExternalImage inner, PlatformGraphicsExternalImageProperties properties)
         {
             _gpu = gpu;
@@ -63,6 +74,10 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
 
         public void Dispose()
         {
+            _cachedSurface?.Dispose();
+            _cachedSurface = null;
+            _cachedRenderTarget?.Dispose();
+            _cachedRenderTarget = null;
             _inner?.Dispose();
             _inner = null;
         }
@@ -75,10 +90,9 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
             var info = _inner!.Info;
 
             // [SNP] inline timing: pinpoint which phase of SnapshotWithSemaphores is the
-            // periodic 5-32ms stall. We've already proven the time isn't in our pool's
-            // CreateCommandBuffer (the queue-scan recycle keeps it sub-ms), so the slow
-            // phase must be one of: ResetContext, SubmitWaitSemaphore, SKSurface.Create,
-            // surface.Snapshot, GrContext.Flush, SubmitSignalSemaphore.
+            // periodic 5-32ms stall. With [SCACHE2] caching, the surfCreate phase should
+            // collapse to ~0 on cache hits; if grFlush also collapses, then per-snapshot
+            // SkSurface churn was the cause of the post-resize jitter.
             double tickToMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
 
@@ -88,29 +102,42 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
             ((Semaphore)waitForSemaphore).Inner.SubmitWaitSemaphore();
             long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
 
-            var imageInfo = new GRVkImageInfo
+            ulong handle = (ulong)info.Handle;
+            SKSurface surface;
+            if (_cachedSurface != null && _cachedImageHandle == handle)
             {
-                CurrentQueueFamily = _gpu.Vulkan.Device.GraphicsQueueFamilyIndex,
-                Format = info.Format,
-                Image = (ulong)info.Handle,
-                ImageLayout = info.Layout,
-                ImageTiling = info.Tiling,
-                ImageUsageFlags = info.UsageFlags,
-                LevelCount = info.LevelCount,
-                SampleCount = info.SampleCount,
-                Protected = info.IsProtected,
-                Alloc = new GRVkAlloc
+                surface = _cachedSurface;
+            }
+            else
+            {
+                _cachedSurface?.Dispose();
+                _cachedRenderTarget?.Dispose();
+                var imageInfo = new GRVkImageInfo
                 {
-                    Memory = (ulong)info.MemoryHandle,
-                    Size = info.MemorySize
-                }
-            };
-            using var renderTarget = new GRBackendRenderTarget(_properties.Width, _properties.Height, imageInfo);
-            using var surface = SKSurface.Create(_gpu.GrContext, renderTarget,
-                _properties.TopLeftOrigin ? GRSurfaceOrigin.TopLeft : GRSurfaceOrigin.BottomLeft,
-                _properties.Format == PlatformGraphicsExternalImageFormat.R8G8B8A8UNorm
-                    ? SKColorType.Rgba8888
-                    : SKColorType.Bgra8888, SKColorSpace.CreateSrgb());
+                    CurrentQueueFamily = _gpu.Vulkan.Device.GraphicsQueueFamilyIndex,
+                    Format = info.Format,
+                    Image = handle,
+                    ImageLayout = info.Layout,
+                    ImageTiling = info.Tiling,
+                    ImageUsageFlags = info.UsageFlags,
+                    LevelCount = info.LevelCount,
+                    SampleCount = info.SampleCount,
+                    Protected = info.IsProtected,
+                    Alloc = new GRVkAlloc
+                    {
+                        Memory = (ulong)info.MemoryHandle,
+                        Size = info.MemorySize
+                    }
+                };
+                _cachedRenderTarget = new GRBackendRenderTarget(_properties.Width, _properties.Height, imageInfo);
+                _cachedSurface = SKSurface.Create(_gpu.GrContext, _cachedRenderTarget,
+                    _properties.TopLeftOrigin ? GRSurfaceOrigin.TopLeft : GRSurfaceOrigin.BottomLeft,
+                    _properties.Format == PlatformGraphicsExternalImageFormat.R8G8B8A8UNorm
+                        ? SKColorType.Rgba8888
+                        : SKColorType.Bgra8888, SKColorSpace.CreateSrgb());
+                _cachedImageHandle = handle;
+                surface = _cachedSurface;
+            }
             long t3 = System.Diagnostics.Stopwatch.GetTimestamp();
 
             var image = surface.Snapshot();
