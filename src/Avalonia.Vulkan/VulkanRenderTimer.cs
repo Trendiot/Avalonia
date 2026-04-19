@@ -105,7 +105,11 @@ public class VulkanRenderTimer : IRenderTimer
                 // timeout so an idle UI (no renders being produced) still probes periodically.
                 // Using a fixed Sleep here would drift relative to vsync and cause periodic
                 // single-frame skips at high refresh rates.
-                _wakeEvent.WaitOne(16);
+                // *** TEMPORARY DIAGNOSTIC: 1ms timeout instead of 16ms to test whether
+                // the safety-timeout path is contributing to PhotonPlot's 32ms outliers
+                // (which match exactly 2 x 16ms). If outliers shift to ~2ms, this is the
+                // cause. Revert to 16 (or remove timeout) once verified.
+                _wakeEvent.WaitOne(1);
             }
 
             _tick?.Invoke(sw.Elapsed);
