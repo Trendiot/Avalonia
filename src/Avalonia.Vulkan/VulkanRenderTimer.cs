@@ -101,10 +101,20 @@ public class VulkanRenderTimer : IRenderTimer
             }
             else
             {
-                // Wait up to one frame's worth (~16ms) for SetPresentFenceWaitAction
-                // to wake us. This is a safety timeout; in steady state the wake event
-                // fires almost immediately because each present sets a fresh fence.
-                _wakeEvent.WaitOne(16);
+                // No fence pending: a tick ran but produced no present (the
+                // common case when ServerCompositionTarget.Render early-returns
+                // because nothing was dirty this iteration — empty ticks are
+                // normal in this loop, which pumps a tick every iteration).
+                //
+                // The 1 ms timeout is intentional. With a 16 ms timeout, runs
+                // of consecutive empty ticks at high refresh rate cap throughput
+                // at roughly 60–115 fps because each empty tick burns up to a
+                // full vsync interval. With 1 ms the empty-tick cost is
+                // negligible and the loop is paced by the present fence wait
+                // (~6 ms at 165 Hz). CPU cost of polling at 1 ms is also
+                // negligible — the wait event still wakes us immediately on
+                // SetPresentFenceWaitAction in the steady-state path.
+                _wakeEvent.WaitOne(1);
             }
 
             _tick?.Invoke(sw.Elapsed);
@@ -119,8 +129,8 @@ public class VulkanRenderTimer : IRenderTimer
     {
         lock (_syncLock)
             _waitForPresentFence = fenceWaitAction;
-        // Wake the render loop immediately so it picks up the new fence on the next
-        // iteration rather than waiting out its 16ms safety timeout.
+        // Wake the render loop in case it's currently sitting in the no-fence
+        // WaitOne branch. See that branch for why the timeout there is short.
         _wakeEvent.Set();
         Logger.TryGet(LogEventLevel.Verbose, "VulkanDynamic")
             ?.Log(this, "Present fence wait action set for VSync synchronization");
