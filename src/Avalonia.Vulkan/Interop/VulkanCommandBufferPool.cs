@@ -76,7 +76,6 @@ internal class VulkanCommandBufferPool : IDisposable
         // periodically late, the head can be unfinished while later CBs are done. Only
         // checking head would force allocation in that case, defeating the recycle.
         int count = _commandBuffers.Count;
-        Console.WriteLine($"Recycling {count} command buffers");
         for (int i = 0; i < count; i++)
         {
             var cb = _commandBuffers.Dequeue();
