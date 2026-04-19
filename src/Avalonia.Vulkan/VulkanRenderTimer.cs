@@ -101,7 +101,10 @@ public class VulkanRenderTimer : IRenderTimer
             }
             else
             {
-                Thread.Sleep(8);
+                // Wait up to one frame's worth (~16ms) for SetPresentFenceWaitAction
+                // to wake us. This is a safety timeout; in steady state the wake event
+                // fires almost immediately because each present sets a fresh fence.
+                _wakeEvent.WaitOne(16);
             }
 
             _tick?.Invoke(sw.Elapsed);
@@ -116,6 +119,9 @@ public class VulkanRenderTimer : IRenderTimer
     {
         lock (_syncLock)
             _waitForPresentFence = fenceWaitAction;
+        // Wake the render loop immediately so it picks up the new fence on the next
+        // iteration rather than waiting out its 16ms safety timeout.
+        _wakeEvent.Set();
         Logger.TryGet(LogEventLevel.Verbose, "VulkanDynamic")
             ?.Log(this, "Present fence wait action set for VSync synchronization");
     }
