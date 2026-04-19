@@ -147,8 +147,11 @@ namespace ControlCatalog.Desktop
                     EnableMultiTouch = true,
                     UseDBusMenu = true,
                     EnableIme = true,
+                    RenderingMode = [X11RenderingMode.VulkanDynamic],
+#pragma warning disable AVALONIA_X11_CSD
+                    EnableDrawnDecorations = true,
+#pragma warning restore AVALONIA_X11_CSD
                 })
-
                 .With(new VulkanOptions
                 {
                     VulkanInstanceCreationOptions = new ()
