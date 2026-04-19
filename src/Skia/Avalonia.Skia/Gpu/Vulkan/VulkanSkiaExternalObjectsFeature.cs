@@ -54,6 +54,26 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
         private IVulkanExternalImage? _inner;
         private readonly PlatformGraphicsExternalImageProperties _properties;
 
+        // Cached Skia backend texture wrapping the imported VkImage. The heavyweight
+        // VkImage-handle-keyed Skia state (image views, descriptor sets, sampler
+        // bindings) lives on the texture; recreating it per snapshot drove Skia's
+        // internal Vulkan pools into a degraded steady state, producing periodic
+        // 5–30 ms grFlush stalls that never recovered after the first external-image
+        // identity change (resize / re-import).
+        //
+        // We cache the texture and create a fresh SKImage via SKImage.FromTexture per
+        // snapshot — that's the canonical Skia pattern for wrapping an external
+        // Vulkan image (per https://skia.org/docs/user/special/vulkan/). The fresh
+        // SKImage has no snapshot-generation tracking, so it always reflects current
+        // VkImage contents (which is what we want — the producer wrote to it
+        // externally; SKSurface-based snapshots returned stale cached results because
+        // Skia only bumps the surface's generation ID on draws through its own canvas).
+        //
+        // Invalidate the cache only when the underlying VkImage handle changes
+        // (image was reimported on the producer side).
+        private GRBackendTexture? _cachedTexture;
+        private ulong _cachedImageHandle;
+
         public Image(VulkanSkiaGpu gpu, IVulkanExternalImage inner, PlatformGraphicsExternalImageProperties properties)
         {
             _gpu = gpu;
@@ -63,6 +83,8 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
 
         public void Dispose()
         {
+            _cachedTexture?.Dispose();
+            _cachedTexture = null;
             _inner?.Dispose();
             _inner = null;
         }
@@ -73,38 +95,45 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
             IPlatformRenderInterfaceImportedSemaphore signalSemaphore)
         {
             var info = _inner!.Info;
-            
+
             _gpu.GrContext.ResetContext();
             ((Semaphore)waitForSemaphore).Inner.SubmitWaitSemaphore();
-            var imageInfo = new GRVkImageInfo
+
+            ulong handle = (ulong)info.Handle;
+            if (_cachedTexture == null || _cachedImageHandle != handle)
             {
-                CurrentQueueFamily = _gpu.Vulkan.Device.GraphicsQueueFamilyIndex,
-                Format = info.Format,
-                Image = (ulong)info.Handle,
-                ImageLayout = info.Layout,
-                ImageTiling = info.Tiling,
-                ImageUsageFlags = info.UsageFlags,
-                LevelCount = info.LevelCount,
-                SampleCount = info.SampleCount,
-                Protected = info.IsProtected,
-                Alloc = new GRVkAlloc
+                _cachedTexture?.Dispose();
+                var imageInfo = new GRVkImageInfo
                 {
-                    Memory = (ulong)info.MemoryHandle,
-                    Size = info.MemorySize
-                }
-            };
-            using var renderTarget = new GRBackendRenderTarget(_properties.Width, _properties.Height, imageInfo);
-            using var surface = SKSurface.Create(_gpu.GrContext, renderTarget,
+                    CurrentQueueFamily = _gpu.Vulkan.Device.GraphicsQueueFamilyIndex,
+                    Format = info.Format,
+                    Image = handle,
+                    ImageLayout = info.Layout,
+                    ImageTiling = info.Tiling,
+                    ImageUsageFlags = info.UsageFlags,
+                    LevelCount = info.LevelCount,
+                    SampleCount = info.SampleCount,
+                    Protected = info.IsProtected,
+                    Alloc = new GRVkAlloc
+                    {
+                        Memory = (ulong)info.MemoryHandle,
+                        Size = info.MemorySize
+                    }
+                };
+                _cachedTexture = new GRBackendTexture(_properties.Width, _properties.Height, imageInfo);
+                _cachedImageHandle = handle;
+            }
+
+            var image = SKImage.FromTexture(_gpu.GrContext, _cachedTexture,
                 _properties.TopLeftOrigin ? GRSurfaceOrigin.TopLeft : GRSurfaceOrigin.BottomLeft,
                 _properties.Format == PlatformGraphicsExternalImageFormat.R8G8B8A8UNorm
                     ? SKColorType.Rgba8888
-                    : SKColorType.Bgra8888, SKColorSpace.CreateSrgb());
-            var image = surface.Snapshot();
+                    : SKColorType.Bgra8888,
+                SKAlphaType.Premul, SKColorSpace.CreateSrgb());
             _gpu.GrContext.Flush();
-            //surface.Canvas.Flush();
-            
+
             ((Semaphore)signalSemaphore).Inner.SubmitSignalSemaphore();
-            
+
             return new ImmutableBitmap(image);
         }
 
