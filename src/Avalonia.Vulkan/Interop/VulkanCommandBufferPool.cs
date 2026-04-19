@@ -12,6 +12,21 @@ internal class VulkanCommandBufferPool : IDisposable
     private VkCommandPool _handle;
     public VkCommandPool Handle => _handle;
 
+    // [POOL] Pool growth tracking. The hypothesis under test: this pool's queue grows
+    // during pressure events (resize storms, many ImportedImage/Semaphore creations) and
+    // never shrinks, so each subsequent CreateCommandBuffer pays an O(N) scan cost that
+    // accumulates as O(N) vkGetFenceStatus calls per snapshot. Reports: pool size, peak
+    // size, allocations (slow path), recycles (fast path), avg scan-depth-to-recycle.
+    // One report per second per pool instance, tagged with a unique pool id so the
+    // process-wide shared external-objects pool is distinguishable from per-display pools.
+    private static int _poolIdCounter;
+    private readonly int _poolId = System.Threading.Interlocked.Increment(ref _poolIdCounter);
+    private long _poolPeakSize;
+    private long _poolAllocs;            // slow path (vkAllocateCommandBuffers + vkCreateFence)
+    private long _poolRecycles;          // fast path (vkResetCommandBuffer of a finished CB)
+    private long _poolScanDepthSum;      // sum of i for recycle hits; / recycles = avg
+    private long _poolLastReportTs;
+
     public VulkanCommandBufferPool(IVulkanPlatformGraphicsContext context, bool autoFree = false)
     {
         _context = context;
@@ -76,12 +91,16 @@ internal class VulkanCommandBufferPool : IDisposable
         // periodically late, the head can be unfinished while later CBs are done. Only
         // checking head would force allocation in that case, defeating the recycle.
         int count = _commandBuffers.Count;
+        if (count > _poolPeakSize) _poolPeakSize = count;
         for (int i = 0; i < count; i++)
         {
             var cb = _commandBuffers.Dequeue();
             if (cb.IsFinished)
             {
                 cb.Reset();
+                _poolRecycles++;
+                _poolScanDepthSum += i;
+                PoolMaybeReport();
                 return cb;
             }
             // Not finished yet; re-enqueue so we keep checking on subsequent calls.
@@ -99,8 +118,25 @@ internal class VulkanCommandBufferPool : IDisposable
         _context.DeviceApi.AllocateCommandBuffers(_context.DeviceHandle, ref commandBufferAllocateInfo,
             &bufferHandle).ThrowOnError("vkAllocateCommandBuffers");
 
+        _poolAllocs++;
+        PoolMaybeReport();
         return new VulkanCommandBuffer(this, bufferHandle, _context);
     }
-    
+
+    private void PoolMaybeReport()
+    {
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_poolLastReportTs == 0) { _poolLastReportTs = now; return; }
+        double tickToMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        if ((now - _poolLastReportTs) * tickToMs < 1000.0) return;
+        long total = _poolRecycles + _poolAllocs;
+        double avgScan = _poolRecycles > 0 ? (double)_poolScanDepthSum / _poolRecycles : 0;
+        System.Console.Error.WriteLine(
+            $"[POOL#{_poolId}] size={_commandBuffers.Count} peak={_poolPeakSize} "
+            + $"calls={total} recycles={_poolRecycles} allocs={_poolAllocs} avgScanToHit={avgScan:F1}");
+        _poolRecycles = _poolAllocs = _poolScanDepthSum = 0;
+        _poolLastReportTs = now;
+    }
+
     public void AddSubmittedCommandBuffer(VulkanCommandBuffer buffer) => _commandBuffers.Enqueue(buffer);
 }
