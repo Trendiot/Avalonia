@@ -83,10 +83,62 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
 
         public void Dispose()
         {
+            // Order matters: Skia holds long-lived sk_sp<GrVkImage> references
+            // backed by our underlying VkImage handle through several internal
+            // caches, and destroying the VkImage/View/Memory before those
+            // references drop produces a use-after-free that surfaces deep
+            // inside ~GrVkFramebuffer when the framebuffer cache is later
+            // evicted (SIGILL inside GrResourceCache::notifyARefCntReachedZero
+            // on a corrupted GrVkImage vtable).
+            //
+            // The Skia caches that outlive ImmutableBitmap disposal:
+            //   • Per-snapshot SKImages — released by the consumer, but their
+            //     CB-captured refs live until the next checkCommandBuffers().
+            //   • The framebuffer cache (GrVkResourceProvider::fFramebuffers)
+            //     holds GrVkFramebuffer objects whose sk_sp<GrVkImage>
+            //     fColorAttachment keeps the wrapped image alive past CB
+            //     recycling, until the framebuffer is evicted.
+            //   • Descriptor sets bound to image views Skia created on top of
+            //     our VkImage handle.
+            //
+            // Sequence below:
+            //   1. Drop the cached descriptor so no NEW SKImages can be
+            //      created referencing this import after we begin teardown.
+            //   2. Flush + submit + sync the GrContext so every CB that
+            //      captured a ref to a wrapped GrVkImage completes on the
+            //      GPU and is recycled — checkCommandBuffers() drops those
+            //      refs during the recycle.
+            //   3. Purge unlocked cached resources so the framebuffer cache
+            //      releases its sk_sp<GrVkImage> ref and Skia destroys the
+            //      wrapped GrVkImage cleanly while our VkImage is still
+            //      valid (Skia's destructor frees its own image views and
+            //      descriptor sets, which need the underlying VkImage
+            //      handle to still exist for well-defined cleanup).
+            //   4. Now safe to destroy the underlying VkImage/View/Memory.
+            //
+            // We're on the compositor render thread (CompositionInterop
+            // routes Dispose through Compositor.InvokeServerJobAsync), so
+            // GrContext access is safe here.
+            // Skip the synchronous flush + purge if Skia never touched this
+            // import (no SnapshotWithSemaphores call ever ran, so _cachedTexture
+            // stayed null and Skia has no GrVkImage backed by our handle).
+            // Avoids a vkQueueWaitIdle-equivalent stall on the common
+            // import-but-never-render path (e.g. resize race teardowns).
+            bool skiaTouchedThisImage = _cachedTexture != null;
+
             _cachedTexture?.Dispose();
             _cachedTexture = null;
-            _inner?.Dispose();
-            _inner = null;
+
+            if (_inner != null)
+            {
+                if (skiaTouchedThisImage)
+                {
+                    _gpu.GrContext.Flush(submit: true, synchronous: true);
+                    _gpu.GrContext.PurgeResources();
+                }
+                _inner.Dispose();
+                _inner = null;
+            }
         }
 
         public IBitmapImpl SnapshotWithKeyedMutex(uint acquireIndex, uint releaseIndex) => throw new NotSupportedException();
