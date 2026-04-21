@@ -54,24 +54,43 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
         private IVulkanExternalImage? _inner;
         private readonly PlatformGraphicsExternalImageProperties _properties;
 
-        // Cached Skia backend texture wrapping the imported VkImage. The heavyweight
-        // VkImage-handle-keyed Skia state (image views, descriptor sets, sampler
-        // bindings) lives on the texture; recreating it per snapshot drove Skia's
-        // internal Vulkan pools into a degraded steady state, producing periodic
-        // 5–30 ms grFlush stalls that never recovered after the first external-image
-        // identity change (resize / re-import).
+        // Cached Skia backend texture + SKImage wrapping the imported VkImage.
         //
-        // We cache the texture and create a fresh SKImage via SKImage.FromTexture per
-        // snapshot — that's the canonical Skia pattern for wrapping an external
-        // Vulkan image (per https://skia.org/docs/user/special/vulkan/). The fresh
-        // SKImage has no snapshot-generation tracking, so it always reflects current
-        // VkImage contents (which is what we want — the producer wrote to it
-        // externally; SKSurface-based snapshots returned stale cached results because
-        // Skia only bumps the surface's generation ID on draws through its own canvas).
+        // The heavyweight VkImage-handle-keyed Skia state (image views, descriptor
+        // sets, sampler bindings) lives on the texture; recreating it per snapshot
+        // drove Skia's internal Vulkan pools into a degraded steady state, producing
+        // periodic 5–30 ms grFlush stalls that never recovered after the first
+        // external-image identity change (resize / re-import).
         //
-        // Invalidate the cache only when the underlying VkImage handle changes
-        // (image was reimported on the producer side).
+        // The SKImage is ALSO cached, not just the texture. This addresses a
+        // separate correctness bug: RefCountable.Ref<T> (which wraps the
+        // IBitmapImpl we return) has a finalizer that calls Dispose(false) on
+        // refcount-zero. If any Ref<IBitmapImpl> escapes to the GC — a very
+        // real scenario during rapid import churn or page teardowns — the
+        // finalizer runs on the .NET Finalizer thread and synchronously calls
+        // SKImage.Dispose(), whose native destructor (~SkImage_Ganesh) touches
+        // GrContext-owned state. That's concurrent access with the compositor
+        // thread and produces torn-state SIGSEGV inside Skia's GrResourceCache
+        // internals.
+        //
+        // By caching the SKImage and treating the consumer's Dispose as a
+        // no-op (via customImageDispose), the SKImage's native lifetime is
+        // anchored to this Image instance and released only inside our
+        // Dispose(), which is always invoked on the compositor render thread
+        // (CompositionGpuImportedObjectBase.DisposeAsync routes through
+        // Compositor.InvokeServerJobAsync). No finalizer thread ever sees it.
+        //
+        // SKImage.FromTexture is safe to cache across snapshots: unlike
+        // SKSurface.Snapshot (whose generation ID only bumps on draws through
+        // Skia's own canvas — producing stale results when the external
+        // producer writes directly to the VkImage), SKImage.FromTexture reads
+        // current backend-texture contents at every draw, so the cached
+        // SKImage always reflects the latest producer writes.
+        //
+        // Invalidate both caches only when the underlying VkImage handle
+        // changes (image was reimported on the producer side).
         private GRBackendTexture? _cachedTexture;
+        private SKImage? _cachedImage;
         private ulong _cachedImageHandle;
 
         public Image(VulkanSkiaGpu gpu, IVulkanExternalImage inner, PlatformGraphicsExternalImageProperties properties)
@@ -120,11 +139,22 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
             // routes Dispose through Compositor.InvokeServerJobAsync), so
             // GrContext access is safe here.
             // Skip the synchronous flush + purge if Skia never touched this
-            // import (no SnapshotWithSemaphores call ever ran, so _cachedTexture
+            // import (no SnapshotWithSemaphores call ever ran, so the caches
             // stayed null and Skia has no GrVkImage backed by our handle).
             // Avoids a vkQueueWaitIdle-equivalent stall on the common
             // import-but-never-render path (e.g. resize race teardowns).
-            bool skiaTouchedThisImage = _cachedTexture != null;
+            bool skiaTouchedThisImage = _cachedImage != null;
+
+            // Teardown order within this method matters: SKImage first (drops
+            // its ref on GRBackendTexture → GrVkTexture), then GRBackendTexture
+            // (Skia descriptor), then flush/purge to reap any cached
+            // framebuffers or descriptor sets that still reference the wrapped
+            // GrVkImage, THEN the underlying VkImage/View/Memory. All of this
+            // runs on the compositor thread (we're invoked via
+            // Compositor.InvokeServerJobAsync), so Skia teardown is safe to
+            // execute here.
+            _cachedImage?.Dispose();
+            _cachedImage = null;
 
             _cachedTexture?.Dispose();
             _cachedTexture = null;
@@ -152,9 +182,16 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
             ((Semaphore)waitForSemaphore).Inner.SubmitWaitSemaphore();
 
             ulong handle = (ulong)info.Handle;
-            if (_cachedTexture == null || _cachedImageHandle != handle)
+            if (_cachedImage == null || _cachedImageHandle != handle)
             {
+                // Handle changed (or first call). Rebuild both caches. Old
+                // SKImage goes first so its ref on the old GRBackendTexture
+                // drops before we dispose the texture — otherwise Skia
+                // internally sees a still-referenced texture being deleted.
+                _cachedImage?.Dispose();
+                _cachedImage = null;
                 _cachedTexture?.Dispose();
+
                 var imageInfo = new GRVkImageInfo
                 {
                     CurrentQueueFamily = _gpu.Vulkan.Device.GraphicsQueueFamilyIndex,
@@ -173,20 +210,27 @@ internal class VulkanSkiaExternalObjectsFeature : IExternalObjectsRenderInterfac
                     }
                 };
                 _cachedTexture = new GRBackendTexture(_properties.Width, _properties.Height, imageInfo);
+                _cachedImage = SKImage.FromTexture(_gpu.GrContext, _cachedTexture,
+                    _properties.TopLeftOrigin ? GRSurfaceOrigin.TopLeft : GRSurfaceOrigin.BottomLeft,
+                    _properties.Format == PlatformGraphicsExternalImageFormat.R8G8B8A8UNorm
+                        ? SKColorType.Rgba8888
+                        : SKColorType.Bgra8888,
+                    SKAlphaType.Premul, SKColorSpace.CreateSrgb());
                 _cachedImageHandle = handle;
             }
 
-            var image = SKImage.FromTexture(_gpu.GrContext, _cachedTexture,
-                _properties.TopLeftOrigin ? GRSurfaceOrigin.TopLeft : GRSurfaceOrigin.BottomLeft,
-                _properties.Format == PlatformGraphicsExternalImageFormat.R8G8B8A8UNorm
-                    ? SKColorType.Rgba8888
-                    : SKColorType.Bgra8888,
-                SKAlphaType.Premul, SKColorSpace.CreateSrgb());
             _gpu.GrContext.Flush();
 
             ((Semaphore)signalSemaphore).Inner.SubmitSignalSemaphore();
 
-            return new ImmutableBitmap(image);
+            // Pass a no-op customImageDispose so ImmutableBitmap.Dispose()
+            // does not touch our cached SKImage. We own its lifetime and
+            // release it in Image.Dispose() on the compositor thread.
+            // Critically, this also prevents RefCountable.Ref<T>'s finalizer
+            // from triggering SKImage native teardown on the .NET Finalizer
+            // thread (which races with the compositor over GrContext and
+            // produces SIGSEGV inside SkImage_Ganesh::~SkImage_Ganesh).
+            return new ImmutableBitmap(_cachedImage, customImageDispose: static () => { });
         }
 
         public IBitmapImpl SnapshotWithTimelineSemaphores(IPlatformRenderInterfaceImportedSemaphore waitForSemaphore,
