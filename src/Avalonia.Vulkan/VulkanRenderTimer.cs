@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Avalonia.Logging;
 using Avalonia.Rendering;
@@ -16,6 +17,25 @@ public class VulkanRenderTimer : IRenderTimer
     private volatile Action<TimeSpan>? _tick;
     private bool _threadStarted;
     private Action? _waitForPresentFence;
+    private TimeSpan _lastTickAt;
+
+    /// <summary>
+    /// Optional callback returning the current display refresh rate (Hz).
+    /// Re-evaluated each iteration so a live monitor refresh-rate change
+    /// propagates without restart. Defaults to a Windows GDI query of the
+    /// primary display's current rate; null on other platforms unless the
+    /// host wires its own.
+    /// </summary>
+    public Func<double>? MaxRefreshRateHzProvider { get; set; } = DefaultRefreshRateProvider();
+
+    /// <summary>
+    /// Multiplier applied to the refresh rate to derive the render-rate cap.
+    /// Default 3.0 paces rendering to at most 3× the display refresh, which
+    /// preserves the MAILBOX present-mode latency benefit (≤ 1/(3·Hz) input
+    /// staleness at vsync) while bounding wasted GPU work to roughly 2
+    /// throw-away frames per displayed frame. Set ≤ 0 to disable capping.
+    /// </summary>
+    public double RenderRateMultiplier { get; set; } = 3.0;
 
     /// <summary>
     /// Raised when the render timer ticks to signal a new frame should be drawn.
@@ -117,9 +137,55 @@ public class VulkanRenderTimer : IRenderTimer
                 _wakeEvent.WaitOne(1);
             }
 
+            // Cap render rate at RenderRateMultiplier × current display refresh.
+            // Re-querying every iteration picks up live changes to the monitor
+            // refresh rate without a restart. Without this cap, MAILBOX +
+            // sub-millisecond GPU frames produce 1000+ fps of throw-away work
+            // (the display engine drops all but the latest queued frame at
+            // every vsync). The default 3× multiplier preserves the MAILBOX
+            // input-latency benefit while eliminating ~80% of the waste.
+            //
+            // Thread.Sleep (not _wakeEvent.WaitOne) so per-frame fence-update
+            // signals don't truncate the cap: SetPresentFenceWaitAction sets
+            // _wakeEvent every frame and would otherwise wake us instantly.
+            var rateHz = MaxRefreshRateHzProvider?.Invoke() ?? 0;
+            if (rateHz > 0 && RenderRateMultiplier > 0)
+            {
+                var targetMs = 1000.0 / (rateHz * RenderRateMultiplier);
+                var deficitMs = targetMs - (sw.Elapsed - _lastTickAt).TotalMilliseconds;
+                if (deficitMs >= 1)
+                    Thread.Sleep((int)deficitMs);
+            }
+            _lastTickAt = sw.Elapsed;
+
             _tick?.Invoke(sw.Elapsed);
         }
     }
+
+    private static Func<double>? DefaultRefreshRateProvider()
+        => OperatingSystem.IsWindows() ? GetWindowsPrimaryRefreshRateHz : null;
+
+    // GDI's GetDeviceCaps(VREFRESH) returns the primary display's *current*
+    // vertical refresh rate; it tracks user-initiated refresh-rate changes
+    // without requiring the process to restart.
+    //
+    // Multi-monitor caveat: this returns only the primary monitor's rate. A
+    // window on a different-rate secondary monitor will still be capped to
+    // the primary's rate × multiplier. Hosts that need per-window precision
+    // can override MaxRefreshRateHzProvider; multi-monitor enhancement (e.g.
+    // mirror DxgiConnection.GetAllMonitorFrequencies, take max) is a follow-up.
+    private static double GetWindowsPrimaryRefreshRateHz()
+    {
+        var dc = GetDC(IntPtr.Zero);
+        if (dc == IntPtr.Zero) return 0;
+        try { return GetDeviceCaps(dc, VREFRESH); }
+        finally { ReleaseDC(IntPtr.Zero, dc); }
+    }
+
+    private const int VREFRESH = 116;
+    [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    [DllImport("gdi32.dll")] private static extern int GetDeviceCaps(IntPtr hDC, int nIndex);
 
     /// <summary>
     /// Updates the fence for Vsync Operations.
