@@ -2,8 +2,10 @@ using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Logging;
 using Avalonia.Rendering;
+using Avalonia.Threading;
 
 namespace Avalonia.Vulkan;
 
@@ -22,9 +24,10 @@ public class VulkanRenderTimer : IRenderTimer
     /// <summary>
     /// Optional callback returning the current display refresh rate (Hz).
     /// Re-evaluated each iteration so a live monitor refresh-rate change
-    /// propagates without restart. Defaults to a Windows GDI query of the
-    /// primary display's current rate; null on other platforms unless the
-    /// host wires its own.
+    /// propagates without restart. Defaults to the highest current refresh
+    /// rate among monitors that host a visible window (refreshed once per
+    /// second on the UI thread); null on non-Windows platforms unless the
+    /// host wires its own. Override to inject a host-specific rate.
     /// </summary>
     public Func<double>? MaxRefreshRateHzProvider { get; set; } = DefaultRefreshRateProvider();
 
@@ -56,6 +59,7 @@ public class VulkanRenderTimer : IRenderTimer
                 {
                     _threadStarted = true;
                     Logger.TryGet(LogEventLevel.Debug, "VulkanDynamic")?.Log(this, "VulkanRenderTimer starting VSync thread");
+                    EnsureRefreshRateMonitorStarted();
                     new Thread(RenderLoop)
                     {
                         IsBackground = true,
@@ -162,18 +166,110 @@ public class VulkanRenderTimer : IRenderTimer
         }
     }
 
+    // ---- Multi-monitor refresh rate tracking (Windows-only) -------------------
+    //
+    // Maintains a process-wide cache of the highest refresh rate among
+    // monitors that currently host a visible Avalonia window. Refreshed once
+    // per second on the UI thread (cheap: a handful of P/Invokes). The render
+    // loop reads the cache via MaxRefreshRateHzProvider on the hot path with
+    // zero allocations and zero lock contention.
+    //
+    // Non-Windows: provider stays null, no cap is applied (same as before).
+    // Override MaxRefreshRateHzProvider to inject a host-specific rate.
+
+    private const double FallbackRefreshHz = 60.0;
+    private static long s_cachedHzBits = BitConverter.DoubleToInt64Bits(FallbackRefreshHz);
+    private static int s_monitorStarted; // 0 = not started, 1 = started
+
+    private static double GetCachedMaxRefreshHz()
+        => BitConverter.Int64BitsToDouble(Interlocked.Read(ref s_cachedHzBits));
+
+    private static void SetCachedMaxRefreshHz(double v)
+        => Interlocked.Exchange(ref s_cachedHzBits, BitConverter.DoubleToInt64Bits(v));
+
     private static Func<double>? DefaultRefreshRateProvider()
-        => OperatingSystem.IsWindows() ? GetWindowsPrimaryRefreshRateHz : null;
+        => OperatingSystem.IsWindows() ? GetCachedMaxRefreshHz : null;
+
+    // Posts an immediate scan and a recurring 1 s DispatcherTimer onto the UI
+    // thread. CompareExchange ensures we wire this up at most once even if
+    // multiple VulkanRenderTimer instances exist. Wrapped in try/catch
+    // because Dispatcher.UIThread may not be available (headless / test).
+    private static void EnsureRefreshRateMonitorStarted()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        if (Interlocked.CompareExchange(ref s_monitorStarted, 1, 0) != 0) return;
+
+        try
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                ScanRefreshRates();
+                DispatcherTimer.Run(
+                    () => { ScanRefreshRates(); return true; },
+                    TimeSpan.FromSeconds(1),
+                    DispatcherPriority.Background);
+            }, DispatcherPriority.Background);
+        }
+        catch (Exception e)
+        {
+            Logger.TryGet(LogEventLevel.Warning, "VulkanDynamic")
+                ?.Log(typeof(VulkanRenderTimer), $"Refresh-rate monitor not started: {e.Message}");
+        }
+    }
+
+    // Walks the desktop lifetime's window list, maps each visible window to
+    // its monitor, and stores the max current refresh rate. Falls back to the
+    // primary monitor when no windows are available (early startup, hidden,
+    // single-view lifetimes that don't expose a window collection).
+    private static void ScanRefreshRates()
+    {
+        try
+        {
+            double max = 0;
+            if (Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+            {
+                foreach (var w in desktop.Windows)
+                {
+                    if (!w.IsVisible) continue;
+                    var handle = w.TryGetPlatformHandle();
+                    var hwnd = handle?.Handle ?? IntPtr.Zero;
+                    if (hwnd == IntPtr.Zero) continue;
+                    var hz = GetMonitorRefreshHzForWindow(hwnd);
+                    if (hz > max) max = hz;
+                }
+            }
+            if (max <= 0) max = GetWindowsPrimaryRefreshRateHz();
+            if (max <= 0) max = FallbackRefreshHz;
+            SetCachedMaxRefreshHz(max);
+        }
+        catch (Exception e)
+        {
+            Logger.TryGet(LogEventLevel.Verbose, "VulkanDynamic")
+                ?.Log(typeof(VulkanRenderTimer), $"Refresh-rate scan failed: {e.Message}");
+        }
+    }
+
+    private static unsafe double GetMonitorRefreshHzForWindow(IntPtr hwnd)
+    {
+        var hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if (hMonitor == IntPtr.Zero) return 0;
+
+        var mi = new MONITORINFOEXW { cbSize = (uint)sizeof(MONITORINFOEXW) };
+        var miPtr = &mi;
+        if (GetMonitorInfo(hMonitor, miPtr) == 0) return 0;
+
+        var dm = new DEVMODEW { dmSize = (ushort)sizeof(DEVMODEW) };
+        // miPtr->szDevice yields a char* (fixed buffer access through a struct
+        // pointer is well-defined; using a `fixed` statement here would be a
+        // CS0213 error since szDevice is already a fixed-size buffer).
+        if (EnumDisplaySettings(miPtr->szDevice, ENUM_CURRENT_SETTINGS, &dm) == 0) return 0;
+
+        return dm.dmDisplayFrequency;
+    }
 
     // GDI's GetDeviceCaps(VREFRESH) returns the primary display's *current*
-    // vertical refresh rate; it tracks user-initiated refresh-rate changes
-    // without requiring the process to restart.
-    //
-    // Multi-monitor caveat: this returns only the primary monitor's rate. A
-    // window on a different-rate secondary monitor will still be capped to
-    // the primary's rate × multiplier. Hosts that need per-window precision
-    // can override MaxRefreshRateHzProvider; multi-monitor enhancement (e.g.
-    // mirror DxgiConnection.GetAllMonitorFrequencies, take max) is a follow-up.
+    // vertical refresh rate. Used as a fallback when no window is mappable
+    // to a monitor (very early startup, no desktop lifetime, etc.).
     private static double GetWindowsPrimaryRefreshRateHz()
     {
         var dc = GetDC(IntPtr.Zero);
@@ -183,9 +279,73 @@ public class VulkanRenderTimer : IRenderTimer
     }
 
     private const int VREFRESH = 116;
+    private const int MONITOR_DEFAULTTONEAREST = 2;
+    private const int ENUM_CURRENT_SETTINGS = -1;
+
+    // All P/Invoke signatures below use only blittable types. The Avalonia.Vulkan
+    // assembly is built with [DisableRuntimeMarshalling], so bool returns and
+    // [MarshalAs(ByValTStr)] strings would fail at runtime — Win32 BOOL maps to
+    // int (0/nonzero), and the inline string buffers are exposed as fixed char
+    // arrays accessed via unsafe pointers.
+
     [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
     [DllImport("gdi32.dll")] private static extern int GetDeviceCaps(IntPtr hDC, int nIndex);
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, int dwFlags);
+
+    [DllImport("user32.dll", EntryPoint = "GetMonitorInfoW")]
+    private static extern unsafe int GetMonitorInfo(IntPtr hMonitor, MONITORINFOEXW* lpmi);
+
+    [DllImport("user32.dll", EntryPoint = "EnumDisplaySettingsW")]
+    private static extern unsafe int EnumDisplaySettings(char* lpszDeviceName, int iModeNum, DEVMODEW* lpDevMode);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int left, top, right, bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct MONITORINFOEXW
+    {
+        public uint cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+        public fixed char szDevice[32];
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct DEVMODEW
+    {
+        public fixed char dmDeviceName[32];
+        public ushort dmSpecVersion;
+        public ushort dmDriverVersion;
+        public ushort dmSize;
+        public ushort dmDriverExtra;
+        public uint dmFields;
+        public int dmPositionX;
+        public int dmPositionY;
+        public uint dmDisplayOrientation;
+        public uint dmDisplayFixedOutput;
+        public short dmColor;
+        public short dmDuplex;
+        public short dmYResolution;
+        public short dmTTOption;
+        public short dmCollate;
+        public fixed char dmFormName[32];
+        public ushort dmLogPixels;
+        public uint dmBitsPerPel;
+        public uint dmPelsWidth;
+        public uint dmPelsHeight;
+        public uint dmDisplayFlags;
+        public uint dmDisplayFrequency;
+        public uint dmICMMethod;
+        public uint dmICMIntent;
+        public uint dmMediaType;
+        public uint dmDitherType;
+        public uint dmReserved1;
+        public uint dmReserved2;
+        public uint dmPanningWidth;
+        public uint dmPanningHeight;
+    }
 
     /// <summary>
     /// Updates the fence for Vsync Operations.
