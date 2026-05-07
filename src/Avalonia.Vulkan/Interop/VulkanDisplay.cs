@@ -151,6 +151,15 @@ internal class VulkanDisplay : IDisposable
             presentMode = VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR;
         }
 
+        // ─── DIAG (PhotonPlot lag investigation) ─────────────────────────
+        // The "Iris Xe loses ~17% of presents" hypothesis hinges on whether
+        // we're actually in MAILBOX (which can drop presents arriving in the
+        // same vsync window) or FIFO (which queues them). Log it once per
+        // swapchain creation.
+        Console.WriteLine($"[VulkanDisplay DIAG] swapchain created: presentMode={presentMode}, " +
+                          $"imageCount={imageCount}, available=[{string.Join(",", modes)}]");
+        // ──────────────────────────────────────────────────────────────────
+
         var swapchainCreateInfo = new VkSwapchainCreateInfoKHR
         {
             sType = VkStructureType.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,

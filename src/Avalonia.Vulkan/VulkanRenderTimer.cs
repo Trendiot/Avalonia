@@ -160,11 +160,69 @@ public class VulkanRenderTimer : IRenderTimer
                 if (deficitMs >= 1)
                     Thread.Sleep((int)deficitMs);
             }
+
+            // ─── DIAG (PhotonPlot lag investigation) ──────────────────────
+            // Capture inter-tick interval BEFORE updating _lastTickAt, so we
+            // measure tick-to-tick distance (i.e. the actual cadence reaching
+            // _tick?.Invoke). If MAILBOX clustering is the cause of DWM losing
+            // ~17% of presents on Iris Xe, we expect to see large variance in
+            // this number — some intervals very short, some long, average
+            // matching the observed Render rate.
+            DiagRecordTick((sw.Elapsed - _lastTickAt).TotalMilliseconds);
+            // ──────────────────────────────────────────────────────────────
+
             _lastTickAt = sw.Elapsed;
 
             _tick?.Invoke(sw.Elapsed);
         }
     }
+
+    // ─── DIAG (PhotonPlot lag investigation) ──────────────────────────────
+    // Per-second snapshot of inter-tick interval distribution: count, min,
+    // max, avg, stddev. Reveals whether ticks are evenly spaced (FIFO-like
+    // behaviour) or clustered (MAILBOX timing variance).
+    private long _diagSampleCount;
+    private double _diagSumMs;
+    private double _diagSumSqMs;
+    private double _diagMinMs = double.MaxValue;
+    private double _diagMaxMs;
+    private double _diagWindowStartElapsedMs;
+    private const double DiagWindowMs = 1000.0;
+
+    private void DiagRecordTick(double intervalMs)
+    {
+        // Initialise window on first sample.
+        if (_diagSampleCount == 0 && _diagWindowStartElapsedMs == 0)
+            _diagWindowStartElapsedMs = _lastTickAt.TotalMilliseconds;
+
+        _diagSampleCount++;
+        _diagSumMs += intervalMs;
+        _diagSumSqMs += intervalMs * intervalMs;
+        if (intervalMs < _diagMinMs) _diagMinMs = intervalMs;
+        if (intervalMs > _diagMaxMs) _diagMaxMs = intervalMs;
+
+        var nowMs = _lastTickAt.TotalMilliseconds;
+        if (nowMs - _diagWindowStartElapsedMs < DiagWindowMs)
+            return;
+
+        // Window full — emit and reset.
+        var n = _diagSampleCount;
+        var avg = _diagSumMs / n;
+        var var = (_diagSumSqMs / n) - (avg * avg);
+        var std = var > 0 ? Math.Sqrt(var) : 0;
+
+        Console.WriteLine(
+            $"[VulkanRenderTimer DIAG] ticks={n} interval(ms): " +
+            $"min={_diagMinMs:F2} max={_diagMaxMs:F2} avg={avg:F2} stddev={std:F2}");
+
+        _diagSampleCount = 0;
+        _diagSumMs = 0;
+        _diagSumSqMs = 0;
+        _diagMinMs = double.MaxValue;
+        _diagMaxMs = 0;
+        _diagWindowStartElapsedMs = nowMs;
+    }
+    // ──────────────────────────────────────────────────────────────────────
 
     // ---- Multi-monitor refresh rate tracking (Windows-only) -------------------
     //
