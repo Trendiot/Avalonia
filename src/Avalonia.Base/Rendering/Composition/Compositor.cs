@@ -38,6 +38,12 @@ namespace Avalonia.Rendering.Composition
         private readonly List<Action> _pendingServerCompositorJobs = new();
         private readonly List<Action> _pendingServerCompositorPostTargetJobs = new();
         private readonly Action _triggerCommitRequested;
+        // Reentrancy guard for inline-commit fast path in RequestCommitAsync.
+        // Set around the body of Commit() so any RequestCommitAsync calls made
+        // by code running inside CommitCore (e.g. RenderFrame → UpdateWithSemaphoresAsync
+        // → InvokeServerJobAsync → PostServerJob → RequestCommitAsync) fall through
+        // to the existing async path rather than recursing into Commit().
+        private bool _uiInsideCommit;
 
         internal IEasing DefaultEasing { get; }
 
@@ -81,7 +87,37 @@ namespace Avalonia.Rendering.Composition
         /// Requests pending changes in the composition objects to be serialized and sent to the render thread
         /// </summary>
         /// <returns>A task that completes when sent changes are applied on the render thread</returns>
-        public Task RequestCommitAsync() => RequestCompositionBatchCommitAsync().Processed;
+        public Task RequestCommitAsync()
+        {
+            var batch = RequestCompositionBatchCommitAsync();
+
+            // Inline-commit on UI thread when safe. Eliminates the dispatcher-post race
+            // where MediaContext.ScheduleRender posts an async commit that hasn't yet
+            // pumped by the time the render-thread tick fires; the server then runs
+            // ApplyPendingBatches on an empty queue, ServerCompositionTarget.Render
+            // early-returns with empty DirtyRects, and a frame is silently dropped at
+            // the panel even though our internal counter ticked.
+            //
+            // Three preconditions:
+            //   (a) on UI thread — required by Dispatcher.VerifyAccess in CommitCore.
+            //       Cross-thread callers fall through to today's async path.
+            //   (b) not already inside Commit — RenderFrame inside CommitCore calls
+            //       UpdateWithSemaphoresAsync → InvokeServerJobAsync → PostServerJob
+            //       → RequestCommitAsync. Without this guard, infinite recursion.
+            //   (c) _pendingBatch == null — when the server hasn't processed the
+            //       previous batch, RequestCompositionBatchCommitAsync deliberately
+            //       defers via pending.Processed.ContinueWith. Sync-committing past
+            //       this would violate the established batch ordering.
+            //
+            // Worst case (any precondition false) falls through to the existing async
+            // path, so this is strictly an optimization with no regression surface.
+            if (Dispatcher.UIThread.CheckAccess() && !_uiInsideCommit && _pendingBatch == null)
+            {
+                Commit();
+            }
+
+            return batch.Processed;
+        }
 
         /// <summary>
         /// Requests pending changes in the composition objects to be serialized and sent to the render thread
@@ -108,15 +144,33 @@ namespace Avalonia.Rendering.Composition
 
         internal CompositionBatch Commit()
         {
+            // Reentrancy guard for the inline-commit fast path in RequestCommitAsync.
+            // Set BEFORE entering CommitCore so that any RequestCommitAsync calls made
+            // by code running inside CommitCore (notably RenderFrame's
+            // UpdateWithSemaphoresAsync chain) fall through to today's async path
+            // rather than recursing into Commit() again.
+            //
+            // Outer try/finally clears _uiInsideCommit even if CommitCore throws.
+            // Inner try/finally preserves the original re-request + AfterCommit
+            // semantics inside the guarded scope (so the re-request also takes the
+            // async path correctly).
+            _uiInsideCommit = true;
             try
             {
-                return CommitCore();
+                try
+                {
+                    return CommitCore();
+                }
+                finally
+                {
+                    if (_invokeBeforeCommitWrite.Count > 0)
+                        RequestCommitAsync();
+                    AfterCommit?.Invoke();
+                }
             }
             finally
             {
-                if (_invokeBeforeCommitWrite.Count > 0)
-                    RequestCommitAsync();
-                AfterCommit?.Invoke();
+                _uiInsideCommit = false;
             }
         }
         
