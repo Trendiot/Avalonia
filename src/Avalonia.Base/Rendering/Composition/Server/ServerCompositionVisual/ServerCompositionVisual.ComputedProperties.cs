@@ -110,15 +110,6 @@ partial class ServerCompositionVisual
         _needsToAddExtraDirtyRectToDirtyRegion = !dirtyForRender && (_needsToAddExtraDirtyRectToDirtyRegion || additionalDirtyRegion);
     }
     
-    // Diagnostics-only accessors (PhotonPlot lag investigation).
-    // _isDirtyForRender is reset to false by ServerCompositionVisual.Update.PostSubgraph
-    // when UpdateRoot visits the visual; if it remains true at Render-early-return time,
-    // it means UpdateRoot did NOT visit this visual that tick.
-    // _ownContentBounds == null happens when ComputeOwnContentBounds returns null/zero —
-    // a SurfaceVisual whose backing bitmap snapshot has no usable dimensions.
-    internal bool DiagnosticIsDirtyForRender => _isDirtyForRender;
-    internal LtrbRect? DiagnosticOwnContentBounds => _ownContentBounds;
-
     public void RecomputeOwnProperties()
     {
         var setDirtyBounds = _contentChanged || _delayPropagateNeedsBoundsUpdate;

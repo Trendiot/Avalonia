@@ -128,92 +128,14 @@ namespace Avalonia.Rendering.Composition.Server
             }
         }
 
-        // ───────── DIAGNOSTIC INSTRUMENTATION (PhotonPlot lag investigation) ─────────
-        //
-        // PhotonPlot internal counter ticks at 60 fps on Iris Xe but DXGI sees only ~50
-        // distinct DWM updates. The hypothesis: this Render() method early-returns 14-18%
-        // of the time, swallowing the present that should have made it to DWM.
-        //
-        // Counters below sample once per second to STDOUT. They tell us:
-        //   1. Whether the early-return actually fires at the rate we expect
-        //   2. Which of the two early-return paths fires (line "all empty" vs "redraw
-        //      false after the |=")
-        //   3. At early-return time, how many SurfaceVisuals in the tree had
-        //      _isDirtyForRender still true (means UpdateRoot did NOT visit them — the
-        //      propagation slip we're hunting) or null _ownContentBounds (means the
-        //      bitmap snapshot returned no usable size).
-        //
-        // Cost: a few interlocked increments per tick + one tree walk per early-return.
-        // Negligible compared to the render itself.
-        private static long s_diagRenderCalls;
-        private static long s_diagEarlyAllEmpty;       // line "DirtyRects empty && !_redrawRequested && !_updateRequested"
-        private static long s_diagEarlyRedrawFalse;    // line "DirtyRects empty after |= and !_redrawRequested"
-        private static long s_diagSurfaceVisualsTotal;
-        private static long s_diagSurfaceVisualsStillDirty;
-        private static long s_diagSurfaceVisualsNullBounds;
-        private static long s_diagLastLogTicks;
-        private const long DiagLogIntervalTicks = 10_000_000L; // 1 second in 100ns ticks
-
-        private void DiagInspectVisualsOnEarlyReturn()
-        {
-            if (Root == null)
-                return;
-            DiagWalkVisualTree(Root);
-        }
-
-        private static void DiagWalkVisualTree(ServerCompositionVisual node)
-        {
-            if (node is ServerCompositionSurfaceVisual)
-            {
-                Interlocked.Increment(ref s_diagSurfaceVisualsTotal);
-                if (node.DiagnosticIsDirtyForRender)
-                    Interlocked.Increment(ref s_diagSurfaceVisualsStillDirty);
-                if (node.DiagnosticOwnContentBounds == null)
-                    Interlocked.Increment(ref s_diagSurfaceVisualsNullBounds);
-            }
-            if (node is ServerCompositionContainerVisual container)
-            {
-                foreach (var child in container.Children)
-                    DiagWalkVisualTree(child);
-            }
-        }
-
-        private static void DiagMaybeLog()
-        {
-            long now = DateTime.UtcNow.Ticks;
-            long last = Interlocked.Read(ref s_diagLastLogTicks);
-            if (now - last < DiagLogIntervalTicks)
-                return;
-            // CAS so only one thread wins the log race per interval.
-            if (Interlocked.CompareExchange(ref s_diagLastLogTicks, now, last) != last)
-                return;
-
-            // Snapshot (and reset) all counters for this window.
-            long calls       = Interlocked.Exchange(ref s_diagRenderCalls,             0);
-            long allEmpty    = Interlocked.Exchange(ref s_diagEarlyAllEmpty,           0);
-            long redrawFalse = Interlocked.Exchange(ref s_diagEarlyRedrawFalse,        0);
-            long visuals     = Interlocked.Exchange(ref s_diagSurfaceVisualsTotal,     0);
-            long stillDirty  = Interlocked.Exchange(ref s_diagSurfaceVisualsStillDirty,0);
-            long nullBounds  = Interlocked.Exchange(ref s_diagSurfaceVisualsNullBounds,0);
-
-            long earlyTotal = allEmpty + redrawFalse;
-            double earlyPct = calls > 0 ? earlyTotal * 100.0 / calls : 0;
-            Console.WriteLine(
-                $"[ServerCompositionTarget DIAG] render={calls} early={earlyTotal} ({earlyPct:F1}%) " +
-                $"[allEmpty={allEmpty} redrawFalse={redrawFalse}] " +
-                $"surfaceVisualsAtEarly={visuals} stillDirty={stillDirty} nullBounds={nullBounds}");
-        }
-        // ──────────────────────────────────────────────────────────────────────────────
-
         public void Render()
         {
-            Interlocked.Increment(ref s_diagRenderCalls);
             IsWaitingForReadyRenderTarget = false;
-
+            
             if (_disposed)
                 return;
 
-            if (Root == null)
+            if (Root == null) 
                 return;
 
             if (_renderTarget?.PlatformRenderTargetState.IsCorrupted == true)
@@ -249,24 +171,12 @@ namespace Avalonia.Rendering.Composition.Server
             }
 
             if (DirtyRects.IsEmpty && !_redrawRequested && !_updateRequested)
-            {
-                Interlocked.Increment(ref s_diagEarlyAllEmpty);
-                DiagInspectVisualsOnEarlyReturn();
-                DiagMaybeLog();
                 return;
-            }
 
             _redrawRequested |= !DirtyRects.IsEmpty;
 
             if (!_redrawRequested)
-            {
-                Interlocked.Increment(ref s_diagEarlyRedrawFalse);
-                DiagInspectVisualsOnEarlyReturn();
-                DiagMaybeLog();
                 return;
-            }
-
-            DiagMaybeLog();
             
             if (!_renderTarget.PlatformRenderTargetState.IsReady)
             {
