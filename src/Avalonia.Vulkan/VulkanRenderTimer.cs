@@ -149,19 +149,12 @@ public class VulkanRenderTimer : IRenderTimer
             // every vsync). The default 3× multiplier preserves the MAILBOX
             // input-latency benefit while eliminating ~80% of the waste.
             //
-            // Thread.Sleep (not _wakeEvent.WaitOne) so per-frame fence-update
+            // Thread.SpinWait (not _wakeEvent.WaitOne) so per-frame fence-update
             // signals don't truncate the cap: SetPresentFenceWaitAction sets
             // _wakeEvent every frame and would otherwise wake us instantly.
             //
             //Use SpinWait as windows sleeps threads at ~16ms
             var rateHz = MaxRefreshRateHzProvider?.Invoke() ?? 0;
-
-            if (rateHz != _cachedRefreshRate)
-            {
-                _cachedRefreshRate = rateHz;
-                Console.WriteLine($"Refresh rate changed to {rateHz} Hz");
-            }
-            
             if (rateHz > 0 && RenderRateMultiplier > 0)
             {
                 var targetMs = 1000.0 / (rateHz * RenderRateMultiplier);
