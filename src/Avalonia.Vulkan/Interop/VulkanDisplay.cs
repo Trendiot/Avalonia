@@ -128,26 +128,59 @@ internal class VulkanDisplay : IDisposable
                 height = height
             };
         }
-        // Present mode selection with priority for VSync modes
+        // Present-mode selection driven by VulkanOptions.PreferredPresentMode.
+        // See VulkanOptions / VulkanPreferredPresentMode for the rationale.
+        //
+        // LowLatency (default):  IMMEDIATE → MAILBOX → FIFO_RELAXED → FIFO
+        // NoTear:                MAILBOX  → FIFO_RELAXED → FIFO     → IMMEDIATE
+        //
+        // Tear-free presentation on the desktop is enforced by the windowing
+        // system's compositor (DWM / Mutter / KWin / Wayland compositor), not
+        // by the Vulkan present mode itself: every Vulkan present we issue is
+        // captured by the compositor, which atomically samples whichever
+        // swapchain image is current at its own vsync. Avalonia has no
+        // fullscreen-exclusive code path — WindowState.FullScreen is
+        // borderless-windowed (see Avalonia.Win32 WindowImpl.cs:1292 and
+        // Avalonia.Native WindowImpl.cs:163) and there are no callers of
+        // IDXGISwapChain::SetFullscreenState(TRUE,...) or the
+        // VK_EXT_full_screen_exclusive extension anywhere in Avalonia/src —
+        // so under that compositor IMMEDIATE behaves like MAILBOX from the
+        // user's point of view: no tearing, no FIFO acquire backpressure.
+        // The 'NoTear' variant is provided for the small set of hosts that
+        // run without a compositor (bare i3/sway without picom, kiosk/
+        // embedded boards) where IMMEDIATE would actually tear.
         VkPresentModeKHR presentMode;
-        if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR))
-        { 
-            // Best: Triple buffering with VSync - low latency, no tearing
+        var preferred = context is VulkanContext vc
+            ? vc.PreferredPresentMode
+            : VulkanPreferredPresentMode.LowLatency;
+        if (preferred == VulkanPreferredPresentMode.LowLatency
+            && modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR))
+        {
+            // Lowest acquire-latency; relies on the compositor for no-tear.
+            presentMode = VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
+        else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR))
+        {
+            // Triple buffering with vsync at the swapchain level. Tear-free
+            // even without a compositor; rarely advertised on X11/Mesa.
             presentMode = VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR;
         }
         else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_FIFO_RELAXED_KHR))
         {
-            // Good: Adaptive VSync - tears only when frame rate drops
+            // Adaptive vsync: tears only when the app misses a vsync boundary.
             presentMode = VkPresentModeKHR.VK_PRESENT_MODE_FIFO_RELAXED_KHR;
         }
         else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_FIFO_KHR))
         {
-            // Standard: Traditional VSync - guaranteed to be available
+            // Traditional vsync. Spec-mandated to always be available; only
+            // reached here when the preferred mode wasn't advertised.
             presentMode = VkPresentModeKHR.VK_PRESENT_MODE_FIFO_KHR;
         }
         else
         {
-            // Fallback: Immediate mode (allows tearing) - only if nothing else available
+            // Spec violation territory; FIFO is required-to-be-supported
+            // (per Vulkan spec § 33.11). Keep IMMEDIATE as a last-ditch
+            // fallback to match the prior code's behavior.
             presentMode = VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR;
         }
 

@@ -16,14 +16,14 @@ public class VulkanPlatformGraphics : IPlatformGraphics
     }
 
     public IPlatformGraphicsContext CreateContext() =>
-        new VulkanContext(_factory.CreateDevice(_platformOptions), _platformOptions.PlatformFeatures, _platformOptions.OnPresentFence, _platformOptions.IsDynamicMode);
+        new VulkanContext(_factory.CreateDevice(_platformOptions), _platformOptions.PlatformFeatures, _platformOptions.OnPresentFence, _platformOptions.IsDynamicMode, _platformOptions.PreferredPresentMode);
 
     public IPlatformGraphicsContext GetSharedContext()
     {
         if (_currentSharedContext?.IsLost == true)
             _currentSharedContext = null;
         return _currentSharedContext =
-            new VulkanContext(_factory.GetSharedDevice(_platformOptions), _platformOptions.PlatformFeatures, _platformOptions.OnPresentFence, _platformOptions.IsDynamicMode);
+            new VulkanContext(_factory.GetSharedDevice(_platformOptions), _platformOptions.PlatformFeatures, _platformOptions.OnPresentFence, _platformOptions.IsDynamicMode, _platformOptions.PreferredPresentMode);
     }
     
     public bool UsesSharedContext => _factory.UsesShadedDevice;
@@ -76,6 +76,12 @@ public class VulkanPlatformGraphics : IPlatformGraphics
     
     public static VulkanPlatformGraphics? TryCreate(VulkanOptions options, VulkanPlatformSpecificOptions platformOptions)
     {
+        // Carry the user-facing PreferredPresentMode through the
+        // platform-specific options bag so VulkanContext / VulkanDisplay can
+        // read it during swapchain creation without re-threading
+        // VulkanOptions through every layer.
+        platformOptions.PreferredPresentMode = options.PreferredPresentMode;
+
         if (options.CustomSharedDevice != null)
             return new(new CustomSharedDeviceFactory(options.CustomSharedDevice), platformOptions);
 
