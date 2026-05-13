@@ -167,7 +167,7 @@ public class VulkanRenderTimer : IRenderTimer
         }
     }
 
-    // ---- Multi-monitor refresh rate tracking (Windows-only) -------------------
+    // ---- Multi-monitor refresh rate tracking -----------------------------------
     //
     // Maintains a process-wide cache of the highest refresh rate among
     // monitors that currently host a visible Avalonia window. Refreshed once
@@ -175,7 +175,9 @@ public class VulkanRenderTimer : IRenderTimer
     // loop reads the cache via MaxRefreshRateHzProvider on the hot path with
     // zero allocations and zero lock contention.
     //
-    // Non-Windows: provider stays null, no cap is applied (same as before).
+    // Windows: walks visible HWNDs, MonitorFromWindow + EnumDisplaySettings.
+    // Linux/X11: walks visible XIDs, XTranslateCoordinates + XRR CRTC walk.
+    // Other platforms: provider stays null, no cap is applied (same as before).
     // Override MaxRefreshRateHzProvider to inject a host-specific rate.
 
     private const double FallbackRefreshHz = 60.0;
@@ -189,7 +191,11 @@ public class VulkanRenderTimer : IRenderTimer
         => Interlocked.Exchange(ref s_cachedHzBits, BitConverter.DoubleToInt64Bits(v));
 
     private static Func<double>? DefaultRefreshRateProvider()
-        => OperatingSystem.IsWindows() ? GetCachedMaxRefreshHz : null;
+    {
+        if (OperatingSystem.IsWindows()) return GetCachedMaxRefreshHz;
+        if (OperatingSystem.IsLinux()) return GetCachedMaxRefreshHz;
+        return null;
+    }
 
     // Posts an immediate scan and a recurring 1 s DispatcherTimer onto the UI
     // thread. CompareExchange ensures we wire this up at most once even if
@@ -197,16 +203,19 @@ public class VulkanRenderTimer : IRenderTimer
     // because Dispatcher.UIThread may not be available (headless / test).
     private static void EnsureRefreshRateMonitorStarted()
     {
-        if (!OperatingSystem.IsWindows()) return;
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) return;
         if (Interlocked.CompareExchange(ref s_monitorStarted, 1, 0) != 0) return;
 
         try
         {
             Dispatcher.UIThread.Post(() =>
             {
-                ScanRefreshRates();
+                Action scan = OperatingSystem.IsWindows()
+                    ? ScanRefreshRatesWindows
+                    : ScanRefreshRatesX11;
+                scan();
                 DispatcherTimer.Run(
-                    () => { ScanRefreshRates(); return true; },
+                    () => { scan(); return true; },
                     TimeSpan.FromSeconds(1),
                     DispatcherPriority.Background);
             }, DispatcherPriority.Background);
@@ -218,11 +227,13 @@ public class VulkanRenderTimer : IRenderTimer
         }
     }
 
+    // ---- Windows ----------------------------------------------------------------
+    //
     // Walks the desktop lifetime's window list, maps each visible window to
     // its monitor, and stores the max current refresh rate. Falls back to the
     // primary monitor when no windows are available (early startup, hidden,
     // single-view lifetimes that don't expose a window collection).
-    private static void ScanRefreshRates()
+    private static void ScanRefreshRatesWindows()
     {
         try
         {
@@ -346,6 +357,217 @@ public class VulkanRenderTimer : IRenderTimer
         public uint dmReserved2;
         public uint dmPanningWidth;
         public uint dmPanningHeight;
+    }
+
+    // ---- Linux/X11 -------------------------------------------------------------
+    //
+    // Returns the MINIMUM refresh rate across active CRTCs — *not* the max,
+    // because X11 multi-monitor compositing is asymmetric to Windows DWM:
+    //
+    //   Windows DWM (esp. Win 11): per-output vsync. A window on the 60 Hz
+    //   panel scans out at 60 while a window on the 165 Hz panel scans out at
+    //   165 concurrently. Capping per-window at MAX-of-windowed-monitors is
+    //   correct.
+    //
+    //   X11: one logical screen, one compositor render thread tied to a
+    //   single vsync source. Mutter / KWin / picom / Xfwm-compositing all
+    //   pace every output at one rate (usually the lowest active, sometimes
+    //   the primary). Even Avalonia windows on the 165 Hz panel of a 60+165
+    //   setup get composited at the slower rate. Per-output vsync is a
+    //   Wayland-era property, not X11.
+    //
+    //   Empirically confirmed on a Titan RTX with a 60 Hz + 165 Hz pair:
+    //   pulling the 165 Hz panel as primary still paced the 165 Hz output at
+    //   60. So capping render at 3× MAX (495 fps) would produce ~8× more
+    //   frames than the compositor can ever consume. 3× MIN matches the
+    //   compositor's actual pace.
+    //
+    // We don't walk windows on X11 (which CRTC the window is on doesn't
+    // matter — the compositor paces globally). Just iterate active CRTCs
+    // and take the min. Disabled CRTCs (Mode == 0) are skipped so a parked
+    // headless output doesn't lock the cap at 0.
+    //
+    // Display handling: we open our own Xlib connection via XOpenDisplay(null)
+    // — Avalonia.X11 owns its Display but it's not exposed to Avalonia.Vulkan
+    // and Xlib connections aren't safe to share across threads without
+    // XInitThreads anyway. The connection is opened lazily on first scan and
+    // kept for the life of the process (one open socket; the OS reclaims on
+    // exit). All XR* calls happen on the UI thread under the same
+    // DispatcherTimer the Windows path uses.
+    //
+    // Library availability: libXrandr.so.2 isn't guaranteed on every Linux
+    // (Wayland-only sessions, headless containers). The first failed call
+    // throws DllNotFoundException, which we catch once and latch into
+    // s_x11Probed so we never retry the lookup on the hot path.
+
+    private static IntPtr s_x11Display;
+    private static bool s_x11Probed;        // set after first XOpenDisplay attempt
+    private static bool s_x11Available;     // true if XOpenDisplay + libXrandr both work
+
+    private static void ScanRefreshRatesX11()
+    {
+        if (!TryEnsureX11()) return;
+        try
+        {
+            var dpy = s_x11Display;
+            IntPtr resources = XRRGetScreenResourcesCurrent(dpy, XDefaultRootWindow(dpy));
+            if (resources == IntPtr.Zero) return;
+            double rate;
+            try { rate = GetX11MinActiveCrtcHz(dpy, resources); }
+            finally { XRRFreeScreenResources(resources); }
+            if (rate <= 0) rate = FallbackRefreshHz;
+            SetCachedMaxRefreshHz(rate);
+        }
+        catch (Exception e)
+        {
+            Logger.TryGet(LogEventLevel.Verbose, "VulkanDynamic")
+                ?.Log(typeof(VulkanRenderTimer), $"X11 refresh-rate scan failed: {e.Message}");
+        }
+    }
+
+    // Iterate every CRTC on the screen, ignore disabled ones (Mode == 0),
+    // compute refresh = dotClock / (hTotal × vTotal) for each, return the
+    // minimum. Returns 0 if no active CRTC is found so the caller falls back
+    // to FallbackRefreshHz (60).
+    private static unsafe double GetX11MinActiveCrtcHz(IntPtr dpy, IntPtr resources)
+    {
+        var res = (XRRScreenResources*)resources;
+        var crtcs = res->Crtcs;
+        int nCrtc = res->NCrtc;
+        double min = 0;
+        for (int i = 0; i < nCrtc; i++)
+        {
+            IntPtr info = XRRGetCrtcInfo(dpy, resources, crtcs[i]);
+            if (info == IntPtr.Zero) continue;
+            try
+            {
+                var ci = (XRRCrtcInfo*)info;
+                if (ci->Mode == IntPtr.Zero) continue; // disabled CRTC
+                double hz = ComputeRefreshHz(res, ci->Mode);
+                if (hz <= 0) continue;
+                if (min == 0 || hz < min) min = hz;
+            }
+            finally
+            {
+                XRRFreeCrtcInfo(info);
+            }
+        }
+        return min;
+    }
+
+    // Finds modeId in resources.Modes[] and returns dotClock / (hTotal * vTotal).
+    // Mode IDs are unique within a screen so the linear scan is bounded by
+    // mode count, which is small (~handful to a few dozen) on any real config.
+    private static unsafe double ComputeRefreshHz(XRRScreenResources* res, IntPtr modeId)
+    {
+        var modes = res->Modes;
+        int n = res->NMode;
+        for (int i = 0; i < n; i++)
+        {
+            if (modes[i].Id != modeId) continue;
+            ulong dotClock = (ulong)modes[i].DotClock.ToInt64();
+            uint hTotal = modes[i].HTotal;
+            uint vTotal = modes[i].VTotal;
+            if (dotClock == 0 || hTotal == 0 || vTotal == 0) return 0;
+            return dotClock / (double)(hTotal * (ulong)vTotal);
+        }
+        return 0;
+    }
+
+    private static bool TryEnsureX11()
+    {
+        if (s_x11Probed) return s_x11Available;
+        s_x11Probed = true;
+        try
+        {
+            s_x11Display = XOpenDisplay(IntPtr.Zero);
+            if (s_x11Display == IntPtr.Zero) return false;
+            // Touch a libXrandr entry point so DllNotFoundException latches
+            // here, before any per-frame call path can hit it. The actual
+            // result is discarded — we just want to know the symbol resolves.
+            _ = XRRGetScreenResourcesCurrent(s_x11Display, XDefaultRootWindow(s_x11Display));
+            s_x11Available = true;
+            return true;
+        }
+        catch (DllNotFoundException)
+        {
+            // libX11.so.6 or libXrandr.so.2 not present (Wayland-only host,
+            // minimal container). Stay silent, leave the cache at fallback.
+            return false;
+        }
+        catch (Exception e)
+        {
+            Logger.TryGet(LogEventLevel.Verbose, "VulkanDynamic")
+                ?.Log(typeof(VulkanRenderTimer), $"X11 probe failed: {e.Message}");
+            return false;
+        }
+    }
+
+    [DllImport("libX11.so.6")] private static extern IntPtr XOpenDisplay(IntPtr name);
+    [DllImport("libX11.so.6")] private static extern IntPtr XDefaultRootWindow(IntPtr display);
+
+    [DllImport("libXrandr.so.2")] private static extern IntPtr XRRGetScreenResourcesCurrent(IntPtr display, IntPtr window);
+    [DllImport("libXrandr.so.2")] private static extern void XRRFreeScreenResources(IntPtr resources);
+    [DllImport("libXrandr.so.2")] private static extern IntPtr XRRGetCrtcInfo(IntPtr display, IntPtr resources, IntPtr crtc);
+    [DllImport("libXrandr.so.2")] private static extern void XRRFreeCrtcInfo(IntPtr info);
+
+    // XRRScreenResources, XRRCrtcInfo, XRRModeInfo — field layouts mirror the
+    // C headers in libXrandr's randr.h / Xrandr.h. Only the fields we read
+    // are commented; unread trailing fields are still declared so the C#
+    // struct *size* matches the C struct size — required because we index
+    // Crtcs[] / Modes[] / Outputs[] arrays of these structs. Each `Time`,
+    // `RRCrtc`, `RROutput`, `RRMode`, `XRRModeFlags` field is a Linux
+    // `unsigned long` (XID or time), which is 4 bytes on 32-bit and 8 on
+    // 64-bit — IntPtr matches that on both. C# Sequential layout reproduces
+    // the C compiler's natural alignment padding.
+
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct XRRScreenResources
+    {
+        public IntPtr Timestamp;
+        public IntPtr ConfigTimestamp;
+        public int NCrtc;
+        public IntPtr* Crtcs;     // RRCrtc* — indexed by ScanRefreshRatesX11
+        public int NOutput;
+        public IntPtr* Outputs;   // unused; declared for size
+        public int NMode;
+        public XRRModeInfo* Modes; // indexed by ComputeRefreshHz
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct XRRCrtcInfo
+    {
+        public IntPtr Timestamp;
+        public int X;
+        public int Y;
+        public uint Width;
+        public uint Height;
+        public IntPtr Mode;       // RRMode — 0 when CRTC is disabled
+        public ushort Rotation;
+        public int NOutput;       // unused; declared for size
+        public IntPtr* Outputs;
+        public ushort Rotations;
+        public int NPossible;
+        public IntPtr* Possible;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct XRRModeInfo
+    {
+        public IntPtr Id;
+        public uint Width;
+        public uint Height;
+        public IntPtr DotClock;   // unsigned long, in Hz of pixel clock
+        public uint HSyncStart;
+        public uint HSyncEnd;
+        public uint HTotal;       // horizontal total (pixels per line)
+        public uint HSkew;
+        public uint VSyncStart;
+        public uint VSyncEnd;
+        public uint VTotal;       // vertical total (lines per frame)
+        public byte* Name;        // unused; declared for size
+        public uint NameLength;
+        public IntPtr ModeFlags;
     }
 
     /// <summary>
