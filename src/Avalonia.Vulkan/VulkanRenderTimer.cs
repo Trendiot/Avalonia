@@ -167,8 +167,6 @@ public class VulkanRenderTimer : IRenderTimer
         }
     }
 
-    private double _cachedRefreshRate = 0;
-    
     // ---- Multi-monitor refresh rate tracking -----------------------------------
     //
     // Maintains a process-wide cache of the highest refresh rate among
