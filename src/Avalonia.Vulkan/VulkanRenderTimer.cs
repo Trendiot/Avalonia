@@ -155,10 +155,17 @@ public class VulkanRenderTimer : IRenderTimer
             //
             //Use SpinWait as windows sleeps threads at ~16ms
             var rateHz = MaxRefreshRateHzProvider?.Invoke() ?? 0;
+
+            if (rateHz != _cachedRefreshRate)
+            {
+                _cachedRefreshRate = rateHz;
+                Console.WriteLine($"Refresh rate changed to {rateHz} Hz");
+            }
+            
             if (rateHz > 0 && RenderRateMultiplier > 0)
             {
                 var targetMs = 1000.0 / (rateHz * RenderRateMultiplier);
-                while(targetMs - (sw.Elapsed - _lastTickAt).TotalMilliseconds >= 1)
+                while(targetMs - (sw.Elapsed - _lastTickAt).TotalMilliseconds >= 0)
                     Thread.SpinWait(100);
             }
             
@@ -167,6 +174,8 @@ public class VulkanRenderTimer : IRenderTimer
         }
     }
 
+    private double _cachedRefreshRate = 0;
+    
     // ---- Multi-monitor refresh rate tracking -----------------------------------
     //
     // Maintains a process-wide cache of the highest refresh rate among
