@@ -156,12 +156,11 @@ public class VulkanRenderTimer : IRenderTimer
             if (rateHz > 0 && RenderRateMultiplier > 0)
             {
                 var targetMs = 1000.0 / (rateHz * RenderRateMultiplier);
-                var deficitMs = targetMs - (sw.Elapsed - _lastTickAt).TotalMilliseconds;
-                if (deficitMs >= 1)
-                    Thread.Sleep((int)deficitMs);
+                while(targetMs - (sw.Elapsed - _lastTickAt).TotalMilliseconds >= 0)
+                    Thread.SpinWait(100);
             }
+            
             _lastTickAt = sw.Elapsed;
-
             _tick?.Invoke(sw.Elapsed);
         }
     }
