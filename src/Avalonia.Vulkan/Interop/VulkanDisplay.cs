@@ -135,6 +135,11 @@ internal class VulkanDisplay : IDisposable
             // Best: Triple buffering with VSync - low latency, no tearing
             presentMode = VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR;
         }
+        else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR))
+        {
+            // Fallback: Immediate mode (allows tearing) - only if nothing else available
+            presentMode = VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
         else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_FIFO_RELAXED_KHR))
         {
             // Good: Adaptive VSync - tears only when frame rate drops
@@ -146,10 +151,8 @@ internal class VulkanDisplay : IDisposable
             presentMode = VkPresentModeKHR.VK_PRESENT_MODE_FIFO_KHR;
         }
         else
-        {
-            // Fallback: Immediate mode (allows tearing) - only if nothing else available
-            presentMode = VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR;
-        }
+            throw new InvalidOperationException("No suitable present mode found");
+       
 
         var swapchainCreateInfo = new VkSwapchainCreateInfoKHR
         {
