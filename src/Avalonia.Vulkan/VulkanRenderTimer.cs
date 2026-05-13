@@ -38,7 +38,7 @@ public class VulkanRenderTimer : IRenderTimer
     /// staleness at vsync) while bounding wasted GPU work to roughly 2
     /// throw-away frames per displayed frame. Set ≤ 0 to disable capping.
     /// </summary>
-    public double RenderRateMultiplier { get; set; } = 3.0;
+    public double RenderRateMultiplier { get; set; } = 1.0;
 
     /// <summary>
     /// Raised when the render timer ticks to signal a new frame should be drawn.
@@ -155,7 +155,7 @@ public class VulkanRenderTimer : IRenderTimer
             //
             //Use SpinWait as windows sleeps threads at ~16ms
             var rateHz = MaxRefreshRateHzProvider?.Invoke() ?? 0;
-            if (rateHz > 0 && RenderRateMultiplier > 0)
+            if (rateHz > 0 && RenderRateMultiplier >= 1)
             {
                 var targetMs = 1000.0 / (rateHz * RenderRateMultiplier);
                 while(targetMs - (sw.Elapsed - _lastTickAt).TotalMilliseconds >= 0)
