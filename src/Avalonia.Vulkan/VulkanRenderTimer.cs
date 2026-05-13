@@ -155,10 +155,10 @@ public class VulkanRenderTimer : IRenderTimer
             //
             //Use SpinWait as windows sleeps threads at ~16ms
             var rateHz = MaxRefreshRateHzProvider?.Invoke() ?? 0;
-            if (rateHz > 0 && RenderRateMultiplier >= 1)
+            if (rateHz > 0 && RenderRateMultiplier > 0)
             {
                 var targetMs = 1000.0 / (rateHz * RenderRateMultiplier);
-                while(targetMs - (sw.Elapsed - _lastTickAt).TotalMilliseconds >= 0)
+                while(targetMs - (sw.Elapsed - _lastTickAt).TotalMilliseconds >= 1)
                     Thread.SpinWait(100);
             }
             
