@@ -152,6 +152,8 @@ public class VulkanRenderTimer : IRenderTimer
             // Thread.Sleep (not _wakeEvent.WaitOne) so per-frame fence-update
             // signals don't truncate the cap: SetPresentFenceWaitAction sets
             // _wakeEvent every frame and would otherwise wake us instantly.
+            //
+            //Use SpinWait as windows sleeps threads at ~16ms
             var rateHz = MaxRefreshRateHzProvider?.Invoke() ?? 0;
             if (rateHz > 0 && RenderRateMultiplier > 0)
             {
