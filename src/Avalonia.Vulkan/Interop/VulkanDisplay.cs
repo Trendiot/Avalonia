@@ -183,6 +183,8 @@ internal class VulkanDisplay : IDisposable
             // fallback to match the prior code's behavior.
             presentMode = VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR;
         }
+        
+        Console.WriteLine($"Present mode: {presentMode}");
 
         var swapchainCreateInfo = new VkSwapchainCreateInfoKHR
         {
