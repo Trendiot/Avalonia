@@ -141,26 +141,26 @@ public class VulkanRenderTimer : IRenderTimer
                 _wakeEvent.WaitOne(1);
             }
 
-            // Cap render rate at RenderRateMultiplier × current display refresh.
-            // Re-querying every iteration picks up live changes to the monitor
-            // refresh rate without a restart. Without this cap, MAILBOX +
-            // sub-millisecond GPU frames produce 1000+ fps of throw-away work
-            // (the display engine drops all but the latest queued frame at
-            // every vsync). The default 3× multiplier preserves the MAILBOX
-            // input-latency benefit while eliminating ~80% of the waste.
-            //
-            // Thread.SpinWait (not _wakeEvent.WaitOne) so per-frame fence-update
-            // signals don't truncate the cap: SetPresentFenceWaitAction sets
-            // _wakeEvent every frame and would otherwise wake us instantly.
-            //
-            //Use SpinWait as windows sleeps threads at ~16ms
-            var rateHz = MaxRefreshRateHzProvider?.Invoke() ?? 0;
-            if (rateHz > 0 && RenderRateMultiplier > 0)
-            {
-                var targetMs = 1000.0 / (rateHz * RenderRateMultiplier);
-                while(targetMs - (sw.Elapsed - _lastTickAt).TotalMilliseconds >= 0)
-                    Thread.SpinWait(100);
-            }
+            // // Cap render rate at RenderRateMultiplier × current display refresh.
+            // // Re-querying every iteration picks up live changes to the monitor
+            // // refresh rate without a restart. Without this cap, MAILBOX +
+            // // sub-millisecond GPU frames produce 1000+ fps of throw-away work
+            // // (the display engine drops all but the latest queued frame at
+            // // every vsync). The default 3× multiplier preserves the MAILBOX
+            // // input-latency benefit while eliminating ~80% of the waste.
+            // //
+            // // Thread.SpinWait (not _wakeEvent.WaitOne) so per-frame fence-update
+            // // signals don't truncate the cap: SetPresentFenceWaitAction sets
+            // // _wakeEvent every frame and would otherwise wake us instantly.
+            // //
+            // //Use SpinWait as windows sleeps threads at ~16ms
+            // var rateHz = MaxRefreshRateHzProvider?.Invoke() ?? 0;
+            // if (rateHz > 0 && RenderRateMultiplier > 0)
+            // {
+            //     var targetMs = 1000.0 / (rateHz * RenderRateMultiplier);
+            //     while(targetMs - (sw.Elapsed - _lastTickAt).TotalMilliseconds >= 0)
+            //         Thread.SpinWait(100);
+            // }
             
             _lastTickAt = sw.Elapsed;
             _tick?.Invoke(sw.Elapsed);
