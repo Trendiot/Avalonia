@@ -150,27 +150,27 @@ internal class VulkanDisplay : IDisposable
         // run without a compositor (bare i3/sway without picom, kiosk/
         // embedded boards) where IMMEDIATE would actually tear.
         VkPresentModeKHR presentMode;
-        var preferred = context is VulkanContext vc
-            ? vc.PreferredPresentMode
-            : VulkanPreferredPresentMode.LowLatency;
-        if (preferred == VulkanPreferredPresentMode.LowLatency
-            && modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR))
-        {
-            // Lowest acquire-latency; relies on the compositor for no-tear.
-            presentMode = VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR;
-        }
-        else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR))
-        {
-            // Triple buffering with vsync at the swapchain level. Tear-free
-            // even without a compositor; rarely advertised on X11/Mesa.
-            presentMode = VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR;
-        }
-        else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_FIFO_RELAXED_KHR))
-        {
-            // Adaptive vsync: tears only when the app misses a vsync boundary.
-            presentMode = VkPresentModeKHR.VK_PRESENT_MODE_FIFO_RELAXED_KHR;
-        }
-        else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_FIFO_KHR))
+        // var preferred = context is VulkanContext vc
+        //     ? vc.PreferredPresentMode
+        //     : VulkanPreferredPresentMode.LowLatency;
+        // if (preferred == VulkanPreferredPresentMode.LowLatency
+        //     && modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR))
+        // {
+        //     // Lowest acquire-latency; relies on the compositor for no-tear.
+        //     presentMode = VkPresentModeKHR.VK_PRESENT_MODE_IMMEDIATE_KHR;
+        // }
+        // else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR))
+        // {
+        //     // Triple buffering with vsync at the swapchain level. Tear-free
+        //     // even without a compositor; rarely advertised on X11/Mesa.
+        //     presentMode = VkPresentModeKHR.VK_PRESENT_MODE_MAILBOX_KHR;
+        // }
+        // else if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_FIFO_RELAXED_KHR))
+        // {
+        //     // Adaptive vsync: tears only when the app misses a vsync boundary.
+        //     presentMode = VkPresentModeKHR.VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+        // }
+        if (modes.Contains(VkPresentModeKHR.VK_PRESENT_MODE_FIFO_KHR))
         {
             // Traditional vsync. Spec-mandated to always be available; only
             // reached here when the preferred mode wasn't advertised.
