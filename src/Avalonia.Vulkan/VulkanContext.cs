@@ -14,21 +14,12 @@ internal class VulkanContext : IVulkanPlatformGraphicsContext
     public IVulkanInstance Instance => Device.Instance;
     private readonly Action<Action>? _onPresentFence;
     private readonly bool _isDynamicMode;
-
-    /// <summary>
-    /// User-selected present-mode preference, propagated from
-    /// <see cref="VulkanOptions.PreferredPresentMode"/>. Read by
-    /// <see cref="Interop.VulkanDisplay.CreateSwapchain"/> when picking which
-    /// <c>VkPresentModeKHR</c> to use for the swapchain.
-    /// </summary>
-    public VulkanPreferredPresentMode PreferredPresentMode { get; }
-
-    public VulkanContext(IVulkanDevice device, Dictionary<Type, object> platformFeatures, Action<Action>? onPresentFence = null, bool isDynamicMode = false, VulkanPreferredPresentMode preferredPresentMode = VulkanPreferredPresentMode.LowLatency)
+    
+    public VulkanContext(IVulkanDevice device, Dictionary<Type, object> platformFeatures, Action<Action>? onPresentFence = null, bool isDynamicMode = false)
     {
         Device = device;
         _onPresentFence = onPresentFence;
         _isDynamicMode = isDynamicMode;
-        PreferredPresentMode = preferredPresentMode;
         using (device.Lock())
         {
             InstanceApi = new VulkanInstanceApi(device.Instance);
