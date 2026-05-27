@@ -101,6 +101,12 @@ namespace Avalonia.Controls
         private bool _isForcedDecorationMode;
 
         /// <summary>
+        /// True when DecorationInset is active (forced mode or extended mode with shadow).
+        /// Used to gate ClientSize adjustments that account for the inset.
+        /// </summary>
+        private bool HasDecorationInset => TopLevelHost.DecorationInset != default;
+
+        /// <summary>
         /// Defines the <see cref="SizeToContent"/> property.
         /// </summary>
         public static readonly StyledProperty<SizeToContent> SizeToContentProperty =
@@ -255,6 +261,7 @@ namespace Avalonia.Controls
             impl.Closing = HandleClosing;
             impl.GotInputWhenDisabled = OnGotInputWhenDisabled;
             impl.WindowStateChanged = HandleWindowStateChanged;
+            impl.WindowTiledChanged = HandleWindowTiledChanged;
             _maxPlatformClientSize = PlatformImpl?.MaxAutoSizeHint ?? default(Size);
             impl.ExtendClientAreaToDecorationsChanged = ExtendClientAreaToDecorationsChanged;
             impl.AllowedWindowActionsChanged = OnAllowedWindowActionsChanged;
@@ -676,6 +683,17 @@ namespace Avalonia.Controls
             return false;
         }
 
+        private WindowEdgeConstraints _tiledEdges;
+
+        private void HandleWindowTiledChanged(WindowEdgeConstraints edges)
+        {
+            _tiledEdges = edges;
+            // Update the decorations' tiled edges for per-edge border adjustments
+            if (TopLevelHost.Decorations != null)
+                TopLevelHost.Decorations.TiledEdges = edges;
+            UpdateDrawnDecorationParts();
+        }
+
         private void HandleWindowStateChanged(WindowState state)
         {
             // Check if platform impl doesn't lie about get_WindowState being usable
@@ -792,6 +810,12 @@ namespace Avalonia.Controls
                                | Chrome.DrawnWindowDecorationParts.Border
                                | Chrome.DrawnWindowDecorationParts.ResizeGrips);
                 }
+                // In tiled/snapped: no shadow; border and resize grips stay enabled
+                // but TiledEdges zeroes frame/grip thickness on constrained edges
+                else if (_tiledEdges != WindowEdgeConstraints.None)
+                {
+                    parts &= ~Chrome.DrawnWindowDecorationParts.Shadow;
+                }
             }
 
             return parts;
@@ -805,6 +829,7 @@ namespace Avalonia.Controls
                 // Only use platform margins if drawn decorations are not active
                 WindowDecorationMargin = PlatformImpl?.ExtendedMargins ?? default;
                 TopLevelHost.DecorationInset = default;
+                PlatformImpl?.SetShadowExtents(default);
                 return;
             }
 
@@ -830,10 +855,20 @@ namespace Avalonia.Controls
             }
             else
             {
-                // In extended mode, app handles the margin itself.
-                WindowDecorationMargin = margin;
-                TopLevelHost.DecorationInset = default;
+                // In extended mode, use DecorationInset for the shadow area so the Window's
+                // content (Background, ContentPresenter) is clipped to the visual frame boundary.
+                // WindowDecorationMargin reports only frame + titlebar for the app to position
+                // content below the titlebar.
+                var contentMargin = new Thickness(
+                    frame.Left,
+                    titleBarHeight + frame.Top,
+                    frame.Right,
+                    frame.Bottom);
+                WindowDecorationMargin = contentMargin;
+                TopLevelHost.DecorationInset = shadow;
             }
+
+            PlatformImpl?.SetShadowExtents(shadow);
         }
 
         private void OnTitleBarHeightHintChanged()
@@ -998,8 +1033,8 @@ namespace Avalonia.Controls
                 // Enable drawn decorations before layout so margins are computed
                 UpdateDrawnDecorations();
                 
-                // In forced mode, adjust ClientSize to reflect usable content area
-                if (_isForcedDecorationMode)
+                // Adjust ClientSize to reflect usable content area (subtract decoration inset)
+                if (HasDecorationInset)
                 {
                     var inset = TopLevelHost.DecorationInset;
                     ClientSize = new Size(
@@ -1052,9 +1087,9 @@ namespace Avalonia.Controls
 
                 DesktopScalingOverride = null;
 
-                // In forced mode, compare against adjusted platform size
+                // Compare against adjusted platform size when decoration inset is active
                 var platformClientSize = PlatformImpl?.ClientSize ?? default;
-                var comparableClientSize = _isForcedDecorationMode
+                var comparableClientSize = HasDecorationInset
                     ? new Size(
                         Math.Max(0, platformClientSize.Width - TopLevelHost.DecorationInset.Left - TopLevelHost.DecorationInset.Right),
                         Math.Max(0, platformClientSize.Height - TopLevelHost.DecorationInset.Top - TopLevelHost.DecorationInset.Bottom))
@@ -1121,8 +1156,8 @@ namespace Avalonia.Controls
 
         private void ResizePlatformImpl(Size size, WindowResizeReason reason)
         {
-            // In forced mode, add decoration inset so platform gets full frame size
-            if (_isForcedDecorationMode)
+            // Add decoration inset so platform gets full window size (including shadow/frame)
+            if (HasDecorationInset)
             {
                 var inset = TopLevelHost.DecorationInset;
                 size = new Size(
@@ -1370,7 +1405,7 @@ namespace Avalonia.Controls
         {
             var sizeToContent = SizeToContent;
             var clientSize = ClientSize;
-            if (_isForcedDecorationMode)
+            if (HasDecorationInset)
             {
                 clientSize = PlatformImpl?.ClientSize ?? clientSize;
                 var inset = TopLevelHost.DecorationInset;
@@ -1458,9 +1493,9 @@ namespace Avalonia.Controls
         /// <inheritdoc/>
         internal override void HandleResized(Size clientSize, WindowResizeReason reason)
         {
-            // In forced decoration mode, the platform's clientSize includes decoration area.
-            // Subtract the decoration inset so Window.ClientSize reflects the usable content area.
-            if (_isForcedDecorationMode)
+            // When decoration inset is active, the platform's clientSize includes the inset area.
+            // Subtract it so Window.ClientSize reflects the usable content area.
+            if (HasDecorationInset)
             {
                 var inset = TopLevelHost.DecorationInset;
                 clientSize = new Size(
