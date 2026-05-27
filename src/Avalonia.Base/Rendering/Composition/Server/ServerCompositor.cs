@@ -260,6 +260,17 @@ namespace Avalonia.Rendering.Composition.Server
                     return true;
                 RenderInterface.EnsureValidBackendContext();
                 ExecuteServerJobs(_receivedJobQueue);
+                // Server jobs (e.g. CompositionDrawingSurface.UpdateWithSemaphoresAsync)
+                // can synchronously fire Surface.Changed → InvalidateContent on visuals,
+                // which enqueues them into the visual-own-properties recompute pass.
+                // Without this second invocation that enqueueing slips to the NEXT
+                // frame's global pass, causing one external-image update to produce TWO
+                // target renders/presents (one for the batch's _redrawRequested, one for
+                // the deferred DirtyRects). Re-running here is idempotent: the queue is
+                // empty when no jobs1 invalidations occurred (steady state for apps not
+                // using GpuInterop), and RecomputeOwnProperties clears its own dirty
+                // flags so a visual processed twice is a no-op the second time.
+                VisualOwnPropertiesUpdatePass();
 
                 foreach (var t in _activeTargets)
                 {

@@ -36,6 +36,26 @@ internal class VulkanCommandBuffer : IDisposable
 
     public bool IsFinished => _fence.IsSignaled;
 
+    // Block until this CB's intrinsic fence signals (i.e., its last submit
+    // completed on the GPU). Used by VulkanDisplay to gate acquire-semaphore
+    // reuse on the same fence the pool already uses for recycling — avoids a
+    // second, parallel fence array that would otherwise have to be kept in
+    // sync with pool state.
+    public void WaitForCompletion(ulong timeout = ulong.MaxValue) => _fence.Wait(timeout);
+
+    /// <summary>
+    /// Resets the command buffer for reuse. The pool was created with
+    /// VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT so per-CB reset is legal.
+    /// The fence is left as-is — already signaled, the next Submit() resets it
+    /// before reuse.
+    /// </summary>
+    public void Reset()
+    {
+        _context.DeviceApi.ResetCommandBuffer(_handle, 0).ThrowOnError("vkResetCommandBuffer");
+        _hasStarted = false;
+        _hasEnded = false;
+    }
+
     public void BeginRecording()
     {
         if (_hasStarted)
