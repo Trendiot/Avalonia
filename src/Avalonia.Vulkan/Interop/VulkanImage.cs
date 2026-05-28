@@ -148,6 +148,13 @@ internal class VulkanImageBase : IDisposable
 
     internal void TransitionLayout(VkImageLayout destinationLayout, VkAccessFlags destinationAccessFlags)
     {
+        // Skip the entire transition path when the image is already in the target
+        // state. Per-frame the same image is transitioned through the same series of
+        // layouts; without this guard each frame submits a CB containing a no-op
+        // image barrier, which still costs a vkQueueSubmit and a fence cycle.
+        if (CurrentLayout == destinationLayout && _currentAccessFlags == destinationAccessFlags)
+            return;
+
         var commandBuffer = _commandBufferPool!.CreateCommandBuffer();
         commandBuffer.BeginRecording();
         VulkanMemoryHelper.TransitionLayout(_context, commandBuffer, Handle,

@@ -15,10 +15,10 @@ internal class VulkanKhrRenderTarget : IVulkanRenderTarget
     public VkFormat Format { get; }
     public bool IsRgba { get; }
 
-    public VulkanKhrRenderTarget(IVulkanKhrSurfacePlatformSurface surface, IVulkanPlatformGraphicsContext context)
+    public VulkanKhrRenderTarget(IVulkanKhrSurfacePlatformSurface surface, IVulkanPlatformGraphicsContext context, bool isDynamicMode = false)
     {
         _platformSurface = surface;
-        _display = VulkanDisplay.CreateDisplay(context, surface);
+        _display = VulkanDisplay.CreateDisplay(context, surface, isDynamicMode);
         _context = context;
         IsRgba = _display.SurfaceFormat.format >= VkFormat.VK_FORMAT_R8G8B8A8_UNORM &&
                  _display.SurfaceFormat.format <= VkFormat.VK_FORMAT_R8G8B8A8_SRGB;
@@ -53,7 +53,11 @@ internal class VulkanKhrRenderTarget : IVulkanRenderTarget
     public IVulkanRenderSession BeginDraw()
     {
         var l = _context.EnsureCurrent();
-        _display.CommandBufferPool.FreeUsedCommandBuffers();
+        // Do NOT call FreeUsedCommandBuffers here. It disposes (vkFreeCommandBuffers
+        // + vkDestroyFence) every CB in the pool, undoing the recycle path in
+        // VulkanCommandBufferPool.CreateCommandBuffer and forcing fresh allocations
+        // on the next frame — which periodically stalls 10-22ms in the driver. The
+        // recycle path bounds pool size by reusing finished CBs in place.
         if (_display.EnsureSwapchainAvailable() || _image == null)
         {
             DestroyImage();
