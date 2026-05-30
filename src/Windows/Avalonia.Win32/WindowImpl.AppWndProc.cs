@@ -765,14 +765,14 @@ namespace Avalonia.Win32
 
                             if (_isClientAreaExtended)
                             {
-                                ExtendClientArea();
+                                ExtendClientArea(frameChanged: false);
 
                                 ExtendClientAreaToDecorationsChanged?.Invoke(true);
                             }
                         }
                         else if (windowState == WindowState.Maximized && _isClientAreaExtended)
                         {
-                            ExtendClientArea();
+                            ExtendClientArea(frameChanged: false);
 
                             ExtendClientAreaToDecorationsChanged?.Invoke(true);
                         }
