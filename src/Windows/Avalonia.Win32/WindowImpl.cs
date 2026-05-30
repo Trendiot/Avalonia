@@ -1184,7 +1184,7 @@ namespace Avalonia.Win32
             return margins;
         }
 
-        private void ExtendClientArea(bool frameChanged = true)
+        private void ExtendClientArea()
         {
             if (!_shown)
             {
@@ -1239,18 +1239,12 @@ namespace Avalonia.Win32
                 DisableCloseButton(_hwnd);
             }
 
-            // Inform the application of the frame change. Skipped when invoked from a window-state
-            // change (frameChanged: false): the OS already issues WM_NCCALCSIZE as part of the
-            // maximize/restore, and a redundant SWP_FRAMECHANGED fired mid-transition cancels the
-            // DWM state animation.
-            if (frameChanged)
-            {
-                SetWindowPos(_hwnd,
-                    IntPtr.Zero,
-                    rcWindow.left, rcWindow.top,
-                    0, 0,
-                    SetWindowPosFlags.SWP_FRAMECHANGED | SetWindowPosFlags.SWP_NOACTIVATE | SetWindowPosFlags.SWP_NOSIZE);
-            }
+            // Inform the application of the frame change.
+            SetWindowPos(_hwnd,
+                IntPtr.Zero,
+                rcWindow.left, rcWindow.top,
+                0, 0,
+                SetWindowPosFlags.SWP_FRAMECHANGED | SetWindowPosFlags.SWP_NOACTIVATE | SetWindowPosFlags.SWP_NOSIZE);
 
             ExtendClientAreaToDecorationsChanged?.Invoke(_isClientAreaExtended);
         }
