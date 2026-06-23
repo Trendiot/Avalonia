@@ -59,6 +59,9 @@ internal unsafe partial class VulkanDeviceApi
     [GetProcAddress("vkEndCommandBuffer")]
     public partial VkResult EndCommandBuffer(VkCommandBuffer commandBuffer);
 
+    [GetProcAddress("vkResetCommandBuffer")]
+    public partial VkResult ResetCommandBuffer(VkCommandBuffer commandBuffer, uint32_t flags);
+
     [GetProcAddress("vkCreateSemaphore")]
     public partial VkResult CreateSemaphore(VkDevice device, ref VkSemaphoreCreateInfo pCreateInfo,
         IntPtr pAllocator, out VkSemaphore pSemaphore);

@@ -55,9 +55,37 @@ internal class VulkanCommandBufferPool : IDisposable
 
     public unsafe VulkanCommandBuffer CreateCommandBuffer()
     {
-        if (_autoFree)
-            FreeFinishedCommandBuffers();
-        
+        // Recycle a finished command buffer if any is available. Allocating a fresh
+        // command buffer + fence per frame (vkAllocateCommandBuffers + vkCreateFence)
+        // periodically stalls in the driver as it maintains its internal freelists
+        // (notably 10–22ms stalls on Mesa). Reusing avoids both calls in steady state.
+        // The pool was created with VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT so
+        // per-CB reset is legal.
+        //
+        // Scan the WHOLE queue rather than just the head: when CBs are submitted with
+        // wait-semaphore dependencies (e.g. SubmitSemaphore in
+        // VulkanExternalObjectsFeature for SnapshotWithSemaphores), their fences only
+        // signal AFTER the user-supplied semaphore signals. If those semaphores are
+        // periodically late, the head can be unfinished while later CBs are done. Only
+        // checking head would force allocation in that case, defeating the recycle.
+        //
+        // We deliberately do NOT call FreeFinishedCommandBuffers here even when
+        // _autoFree is set — disposing CBs (vkFreeCommandBuffers + vkDestroyFence)
+        // would drain the queue and force a fresh allocation on every call,
+        // re-introducing the stall the recycle path is designed to avoid.
+        int count = _commandBuffers.Count;
+        for (int i = 0; i < count; i++)
+        {
+            var cb = _commandBuffers.Dequeue();
+            if (cb.IsFinished)
+            {
+                cb.Reset();
+                return cb;
+            }
+            // Not finished yet; re-enqueue so we keep checking on subsequent calls.
+            _commandBuffers.Enqueue(cb);
+        }
+
         var commandBufferAllocateInfo = new VkCommandBufferAllocateInfo
         {
             sType = VkStructureType.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
