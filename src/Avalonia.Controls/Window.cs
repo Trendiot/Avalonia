@@ -1549,6 +1549,7 @@ namespace Avalonia.Controls
                 var (_, typedNewValue) = change.GetOldAndNewValue<WindowDecorations>();
 
                 PlatformImpl?.SetWindowDecorations(typedNewValue);
+                UpdateDrawnDecorations();
             }
 
             else if (change.Property == WindowDecorationsThemeProperty)
