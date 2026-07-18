@@ -119,7 +119,11 @@ internal class VulkanDisplay : IDisposable
             preTransform = supportsIdentityTransform && isRotated
                 ? VkSurfaceTransformFlagsKHR.VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
                 : capabilities.currentTransform,
-            compositeAlpha = VkCompositeAlphaFlagsKHR.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+            // Fixes popups that so they allow transparency
+            compositeAlpha = capabilities.supportedCompositeAlpha.HasAllFlags(
+                VkCompositeAlphaFlagsKHR.VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR)
+                ? VkCompositeAlphaFlagsKHR.VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR
+                : VkCompositeAlphaFlagsKHR.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
             presentMode = presentMode,
             clipped = 1,
             oldSwapchain = oldDisplay?._swapchain ?? default
