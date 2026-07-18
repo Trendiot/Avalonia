@@ -143,15 +143,6 @@ namespace Avalonia.X11
             else if (glfeature == null)
                 visualInfo = _x11.TransparentVisualInfo;
 
-            // NEW: Vulkan case – also ask for the transparent visual. This solves an issue where vulkan
-            // windows do not allow transparency. 
-            var vulkan = glfeature is Avalonia.Vulkan.VulkanPlatformGraphics;
-            if (vulkan)
-            {
-                // If we didn't already pick a visual (GLX/EGL), force the ARGB visual
-                visualInfo ??= _x11.TransparentVisualInfo;
-            }
-            
             var visual = IntPtr.Zero;
             var depth = 24;
             if (visualInfo != null)
